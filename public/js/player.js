@@ -897,24 +897,15 @@ export async function openPlayer(item) {
       allowfullscreen: '',
       referrerpolicy: 'origin',
       loading: 'eager',
-      // Every ad these embeds run needs one of the capabilities left out here:
-      // window.open for popunders, top-level navigation for redirect hijacks,
-      // modals for the "your player is out of date" bait. What is left is what
-      // a video player actually uses, so the feature still plays.
-      sandbox: [
-        'allow-scripts',
-        'allow-same-origin',
-        'allow-forms',
-        'allow-presentation',
-        'allow-orientation-lock',
-        'allow-pointer-lock',
-      ].join(' '),
+      // No sandbox attribute: providers refuse to boot their player inside one
+      // ("this content can't be embedded in a sandboxed frame"), and this is the
+      // last-resort path — a frame that will not start is worse than one that
+      // can open a popup. The direct stream above never reaches this branch.
     });
     stage.append(iframe);
     stage.classList.remove('is-idle');
     buildEmbedControls();
-    flashNote('Popups and redirects are blocked in this frame. If the player stays black, switch source.', 5200);
-    on(iframe, 'load', () => flashNote('Source loaded. If playback does not start, try another source.', 3600));
+    on(iframe, 'load', () => flashNote('Backup player loaded.', 2600));
   };
 
   /* ------------------------------ boot -------------------------------- */

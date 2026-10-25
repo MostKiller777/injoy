@@ -444,7 +444,7 @@ async function handleApi(req, res, url) {
       const session = createDashSession(id, found);
       let caching = false;
       if (cacheSlotAvailable()) {
-        const job = startDashDownload({ id, title: meta.title ?? id, found });
+        const job = startDashDownload({ id, title: meta.title ?? id, found, target });
         caching = ['resolving', 'downloading', 'finalizing'].includes(job.status);
       }
       return json(res, 200, {

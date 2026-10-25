@@ -1,7 +1,7 @@
 import { createDecipheriv } from 'node:crypto';
 import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { dashSegmentUrl, loadDashManifest } from './dash.js';
+import { dashSegmentUrl, loadDashManifest, resolveDashTracks } from './dash.js';
 import { dashSegmentFile, prepareDashDir, removeDash, writeDashManifest } from './dashstore.js';
 import { registerDash, registerMedia, mediaPath, safeKey } from './media.js';
 import { resolveStream } from './resolver.js';
@@ -27,6 +27,10 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const CONCURRENCY = 6;
 const REQUEST_TIMEOUT = 30_000;
 const MAX_SEGMENTS = 20_000;
+// DASH downloads ride signed URLs that expire long before a feature-length
+// fetch finishes, so the job refreshes the manifest instead of dying.
+const DASH_CONCURRENCY = 6;
+const MAX_URL_REFRESH = 8;
 
 export const jobs = new Map();
 
@@ -83,7 +87,11 @@ async function request(url, { headers = {}, signal, asText = false } = {}) {
       redirect: 'follow',
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText} ${url.slice(0, 120)}`);
+    if (!res.ok) {
+      const err = new Error(`${res.status} ${res.statusText} ${url.slice(0, 120)}`);
+      err.status = res.status;
+      throw err;
+    }
     if (asText) return await res.text();
     const buffer = Buffer.from(await res.arrayBuffer());
     return { buffer, contentType: res.headers.get('content-type') ?? '' };
@@ -370,8 +378,10 @@ async function downloadHls(job, url, headers) {
  * the same feeder it uses for a live session, pointed at this disk.
  */
 async function downloadDash(job, found) {
-  const { video, audio, duration } = found;
-  const segments = video.segments;
+  let video = found.video;
+  let audio = found.audio;
+  const { duration } = found;
+  let segments = video.segments;
   if (!segments) throw new Error('manifest has no segments');
 
   const headers = found.referer ? { referer: found.referer, origin: found.referer } : {};
@@ -384,27 +394,92 @@ async function downloadDash(job, found) {
 
   await prepareDashDir(job.id);
 
-  const save = async (track, name, index) => {
-    const { buffer } = await request(dashSegmentUrl(track, index), {
-      headers,
-      signal: job.controller.signal,
-    });
-    await writeFile(dashSegmentFile(job.id, name, index), buffer);
-    job.bytes += buffer.length;
-    job.segmentsDone += 1;
-    job.updatedAt = now();
+  // Provider URLs are signed and the signature outlives nothing: a feature
+  // length download runs longer than the token does. Re-resolve on expiry and
+  // keep the fragments already on disk — the job resumes instead of restarting.
+  let refreshes = 0;
+  let refreshPending = null;
+  let generation = 0;
+  let cursor = 0;
+
+  const refresh = async () => {
+    if (refreshPending) return refreshPending;
+    if (!job.target) throw new Error('stream URL expired and this title cannot be re-resolved');
+    if (refreshes >= MAX_URL_REFRESH) throw new Error('stream URL kept expiring; gave up');
+    refreshes += 1;
+
+    refreshPending = (async () => {
+      const next = await resolveDashTracks(job.target);
+      if (!next.ok) throw new Error(next.error ?? 're-resolve failed');
+      if (!next.video?.segments) throw new Error('re-resolved manifest has no segments');
+
+      // A different rendition means the fragments on disk no longer line up
+      // with the URLs, so the partial copy is thrown away and refetched.
+      const sameRendition = next.video.segments === segments
+        && (next.video.width ?? 0) === (video.width ?? 0)
+        && (next.video.height ?? 0) === (video.height ?? 0);
+
+      if (!sameRendition) {
+        await removeDash(job.id);
+        await prepareDashDir(job.id);
+        generation += 1;
+        segments = next.video.segments;
+        job.segmentsTotal = segments * 2 + 2;
+        job.segmentsDone = 0;
+        job.bytes = 0;
+        cursor = 0;
+      }
+
+      video = next.video;
+      audio = next.audio;
+      job.updatedAt = now();
+    })().finally(() => { refreshPending = null; });
+
+    return refreshPending;
   };
 
-  let cursor = 0;
+  const save = async (name, index) => {
+    const file = dashSegmentFile(job.id, name, index);
+    const gen = generation;
+
+    // Resume: a fragment already written by an interrupted run is not refetched.
+    const onDisk = await stat(file).catch(() => null);
+    if (onDisk?.isFile() && onDisk.size > 0) return;
+
+    for (let attempt = 0; ; attempt += 1) {
+      const track = name === 'video' ? video : audio;
+      try {
+        const { buffer } = await request(dashSegmentUrl(track, index), {
+          headers,
+          signal: job.controller.signal,
+        });
+        // A refresh may have wiped the track directory mid-flight; a stale
+        // buffer belongs to the discarded rendition and must not be written.
+        if (gen !== generation) throw Object.assign(new Error('rendition changed'), { stale: true });
+        await writeFile(file, buffer);
+        job.bytes += buffer.length;
+        job.segmentsDone += 1;
+        job.updatedAt = now();
+        return;
+      } catch (err) {
+        if (job.cancelled) throw err;
+        if (err.stale) { attempt -= 1; continue; }
+        const expired = err.status === 401 || err.status === 403 || err.status === 404 || err.status === 410;
+        if (!expired || attempt >= 2) throw err;
+        await refresh();
+      }
+    }
+  };
+
   const worker = async () => {
     while (!job.cancelled) {
       const index = cursor;
       cursor += 1;
       if (index > segments) return;
-      await Promise.all([save(video, 'video', index), save(audio, 'audio', index)]);
+      await Promise.all([save('video', index), save('audio', index)]);
     }
   };
-  await Promise.all(Array.from({ length: 3 }, worker));
+  await Promise.all(Array.from({ length: DASH_CONCURRENCY }, worker));
   if (job.cancelled) throw new Error('cancelled');
 
   const manifest = {
@@ -435,6 +510,7 @@ async function downloadDash(job, found) {
  */
 async function downloadAuto(job, target) {
   job.status = 'resolving';
+  job.target = target ?? null;
   job.updatedAt = now();
 
   const resolved = await resolveStream(target);
@@ -483,7 +559,7 @@ async function downloadAuto(job, target) {
   return container;
 }
 
-export function startDashDownload({ id, title, found }) {
+export function startDashDownload({ id, title, found, target = null }) {
   const key = String(id);
   if (!key) throw new Error('id required');
   if (!found?.video || !found?.audio) throw new Error('dash tracks required');
@@ -495,6 +571,7 @@ export function startDashDownload({ id, title, found }) {
 
   const job = createJob(key, title, null);
   job.container = { ext: 'dash', playable: true };
+  job.target = target ?? found.target ?? null;
 
   (async () => {
     try {
@@ -507,7 +584,9 @@ export function startDashDownload({ id, title, found }) {
       job.status = job.cancelled ? 'cancelled' : 'error';
       job.error = err.message;
       job.updatedAt = now();
-      await removeDash(job.id);
+      // A cancelled job leaves nothing worth keeping. A failed one keeps its
+      // fragments: the next attempt resumes from them instead of refetching.
+      if (job.cancelled) await removeDash(job.id);
     }
   })();
 
