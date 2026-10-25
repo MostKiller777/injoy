@@ -113,6 +113,14 @@ PORT=6967 HOST=0.0.0.0 DATA_DIR=/var/lib/injoy node server/index.js
 
 Put nginx or Caddy in front for TLS. There is no auth layer — the watchlist and progress endpoints are open, so a public deployment is a public deployment.
 
+**Instant public URL, no account**
+
+```powershell
+.\scripts\tunnel.ps1
+```
+
+It fetches `cloudflared` once, starts the server if it is not already up, and prints a `https://<words>.trycloudflare.com` URL. The URL is ephemeral: it lives as long as that window stays open and changes on the next run. Good for showing the site to someone; not a deployment.
+
 **Notes on hosting**
 
 - Downloads need Chrome or Edge for the resolver. The Docker image ships neither, so `POST /api/download/<id>` without a `url` answers `resolver unavailable` there. Downloads with an explicit `url` work everywhere — HLS and progressive are pure Node.
