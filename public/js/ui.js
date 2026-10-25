@@ -1,4 +1,4 @@
-import { getDetail, getDownload, startDownload } from './api.js';
+import { getDetail } from './api.js';
 import { inList, progressFor, toggleList } from './state.js';
 
 /* ------------------------------- helpers -------------------------------- */
@@ -624,90 +624,10 @@ function renderDetail(panel, detail, handlers) {
   }, icon(inList(detail.id) ? 'check' : 'plus'), el('span', { text: inList(detail.id) ? 'In my list' : 'My list' }));
 
   const actions = el('div', { class: 'detail-actions' }, playButton, listButton);
-
-  // Local copy: if the file is on disk the player gets a native <video> with
-  // seek and resume instead of an iframe. If it is not, this button resolves a
-  // stream and downloads it, polling the same job endpoint the server exposes.
-  const localSource = (detail.sources ?? []).find((source) => source.provider === 'local');
-  const downloadButton = el('button', {
-    class: 'btn btn-ghost', type: 'button',
-    on: {
-      click: async () => {
-        if (localSource) {
-          handlers.close();
-          handlers.onPlay?.(detail, 'local');
-          return;
-        }
-        downloadButton.disabled = true;
-        downloadButton.replaceChildren(icon('download'), el('span', { text: 'Resolving…' }));
-        try {
-          await startDownload(detail.id, detail.title);
-        } catch (err) {
-          downloadButton.disabled = false;
-          downloadButton.replaceChildren(icon('download'), el('span', { text: 'Download' }));
-          toast(err.message, 'error');
-          return;
-        }
-
-        const tick = async () => {
-          if (!document.body.contains(downloadButton)) return;
-          try {
-            const { job, media } = await getDownload(detail.id);
-            if (media) {
-              downloadButton.replaceChildren(icon('play'), el('span', { text: 'Play local' }));
-              downloadButton.disabled = false;
-              downloadButton.classList.remove('is-busy');
-              toast('Download finished — playing from disk');
-              return;
-            }
-            if (!job) {
-              downloadButton.disabled = false;
-              downloadButton.replaceChildren(icon('download'), el('span', { text: 'Download' }));
-              return;
-            }
-            if (job.status === 'error' || job.status === 'cancelled') {
-              downloadButton.disabled = false;
-              downloadButton.classList.remove('is-busy');
-              downloadButton.replaceChildren(icon('download'), el('span', { text: 'Download' }));
-              toast(job.error ?? 'Download stopped', 'error');
-              return;
-            }
-            downloadButton.classList.add('is-busy');
-            const label = job.status === 'resolving' ? 'Resolving…'
-              : job.status === 'finalizing' ? 'Finishing…'
-              : job.percent !== null ? `${job.percent}%` : 'Downloading…';
-            downloadButton.replaceChildren(icon('download'), el('span', { text: label }));
-            setTimeout(tick, 1200);
-          } catch {
-            downloadButton.disabled = false;
-            downloadButton.replaceChildren(icon('download'), el('span', { text: 'Download' }));
-          }
-        };
-        setTimeout(tick, 800);
-      },
-    },
-  }, localSource ? icon('play') : icon('download'),
-  el('span', { text: localSource ? 'Play local' : 'Download' }));
-
-  if (localSource) downloadButton.classList.add('is-local');
-  actions.append(downloadButton);
   if (detail.trailer) {
     actions.append(el('a', {
       class: 'btn btn-ghost', href: detail.trailer.url, target: '_blank', rel: 'noopener noreferrer',
     }, icon('ticket'), el('span', { text: 'Trailer' })));
-  }
-
-  const sources = el('div', { class: 'source-list' });
-  for (const source of (detail.sources ?? []).slice(0, 6)) {
-    sources.append(el('button', {
-      class: 'source-pill', type: 'button',
-      on: {
-        click: () => {
-          handlers.close();
-          handlers.onPlay?.(detail, source.provider);
-        },
-      },
-    }, source.label));
   }
 
   const overview = el('p', { class: 'detail-overview', text: detail.overview || 'No synopsis on file for this one.' });
@@ -716,10 +636,6 @@ function renderDetail(panel, detail, handlers) {
     overview,
     actions,
     detail.kind === 'series' ? seriesBrowser(detail, handlers) : null,
-    (detail.sources ?? []).length ? el('div', {},
-      el('h3', { class: 'section-label', text: detail.kind === 'series' ? 'Episode sources' : 'Sources' }),
-      sources,
-    ) : null,
     (detail.cast ?? []).length ? el('div', {},
       el('h3', { class: 'section-label', text: 'Cast' }),
       el('div', { class: 'cast-row' },

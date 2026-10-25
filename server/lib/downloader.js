@@ -1,7 +1,10 @@
 import { createDecipheriv } from 'node:crypto';
-import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { registerMedia, mediaPath, safeKey } from './media.js';
+import { dashSegmentUrl, loadDashManifest } from './dash.js';
+import { dashSegmentFile, prepareDashDir, removeDash, writeDashManifest } from './dashstore.js';
+import { registerDash, registerMedia, mediaPath, safeKey } from './media.js';
+import { resolveStream } from './resolver.js';
 
 /**
  * Download engine.
@@ -360,21 +363,159 @@ async function downloadHls(job, url, headers) {
 }
 
 /**
- * Kick off a download. Returns the job view immediately; the work continues in
- * the background and is polled through `jobFor`.
+ * DASH download: keep the provider's own fragments.
  *
- * With no `url` the job is only registered as `resolving` — the route uses that
- * to claim the id while a headless browser looks for a stream, so the client
- * polls one id from the first second instead of racing a second request.
+ * Video and audio arrive as separate tracks, so the saved copy is two folders
+ * of fMP4 segments plus a manifest. The player feeds those straight into MSE —
+ * the same feeder it uses for a live session, pointed at this disk.
  */
-export function startDownload({ id, title, url, referer, origin }) {
+async function downloadDash(job, found) {
+  const { video, audio, duration } = found;
+  const segments = video.segments;
+  if (!segments) throw new Error('manifest has no segments');
+
+  const headers = found.referer ? { referer: found.referer, origin: found.referer } : {};
+
+  job.status = 'downloading';
+  job.segmentsTotal = segments * 2 + 2;
+  job.total = Math.round(((duration || 0) * ((video.bandwidth || 0) + (audio.bandwidth || 0))) / 8) || 0;
+  job.container = { ext: 'dash', playable: true };
+  job.updatedAt = now();
+
+  await prepareDashDir(job.id);
+
+  const save = async (track, name, index) => {
+    const { buffer } = await request(dashSegmentUrl(track, index), {
+      headers,
+      signal: job.controller.signal,
+    });
+    await writeFile(dashSegmentFile(job.id, name, index), buffer);
+    job.bytes += buffer.length;
+    job.segmentsDone += 1;
+    job.updatedAt = now();
+  };
+
+  let cursor = 0;
+  const worker = async () => {
+    while (!job.cancelled) {
+      const index = cursor;
+      cursor += 1;
+      if (index > segments) return;
+      await Promise.all([save(video, 'video', index), save(audio, 'audio', index)]);
+    }
+  };
+  await Promise.all(Array.from({ length: 3 }, worker));
+  if (job.cancelled) throw new Error('cancelled');
+
+  const manifest = {
+    id: job.id,
+    title: job.title,
+    duration: duration ?? null,
+    segmentDuration: video.segmentDuration,
+    startNumber: video.startNumber,
+    segments,
+    video: {
+      codecs: video.codecs,
+      mime: `video/mp4; codecs="${video.codecs}"`,
+      width: video.width ?? 0,
+      height: video.height ?? 0,
+    },
+    audio: { codecs: audio.codecs, mime: `audio/mp4; codecs="${audio.codecs}"` },
+    createdAt: now(),
+  };
+  await writeDashManifest(job.id, manifest);
+  await registerDash({ id: job.id, title: job.title, duration: duration ?? null, segments });
+
+  return { ext: 'dash', playable: true };
+}
+
+/**
+ * No URL given: find one, then take whichever shape it came in. DASH goes to the
+ * segment store; HLS and progressive files go through the byte engines.
+ */
+async function downloadAuto(job, target) {
+  job.status = 'resolving';
+  job.updatedAt = now();
+
+  const resolved = await resolveStream(target);
+  if (job.cancelled) throw new Error('cancelled');
+  if (!resolved.url) throw new Error(resolved.error ?? 'no provider produced a stream');
+
+  if (resolved.type === 'dash') {
+    const manifest = await loadDashManifest(resolved.url, resolved.referer ?? null);
+    if (!manifest.ok) throw new Error(manifest.error);
+    return downloadDash(job, { ...manifest, referer: resolved.referer ?? null });
+  }
+
+  const headers = resolved.referer
+    ? { referer: resolved.referer, origin: new URL(resolved.referer).origin }
+    : {};
+
+  job.status = 'downloading';
+  job.updatedAt = now();
+
+  let container;
+  if (/\.m3u8(\?|$)/i.test(resolved.url)) {
+    container = await downloadHls(job, resolved.url, headers);
+  } else {
+    try {
+      container = await downloadProgressive(job, resolved.url, headers);
+    } catch (err) {
+      if (/DASH manifest/.test(err.message)) throw err;
+      container = await downloadHls(job, resolved.url, headers);
+    }
+  }
+
+  if (job.cancelled) throw new Error('cancelled');
+
+  job.status = 'finalizing';
+  job.updatedAt = now();
+  const finalPath = mediaPath(job.id, container.ext);
+  await rename(job.tempPath, finalPath);
+  await registerMedia({
+    id: job.id,
+    title: job.title,
+    file: finalPath,
+    ext: container.ext,
+    source: resolved.url,
+  });
+
+  return container;
+}
+
+export function startDashDownload({ id, title, found }) {
   const key = String(id);
   if (!key) throw new Error('id required');
+  if (!found?.video || !found?.audio) throw new Error('dash tracks required');
 
   const existing = jobs.get(key);
-  const active = existing && !['error', 'cancelled', 'done', 'resolving'].includes(existing.status);
-  if (active) return jobView(existing);
+  if (existing && ['resolving', 'downloading', 'finalizing'].includes(existing.status)) {
+    return jobView(existing);
+  }
 
+  const job = createJob(key, title, null);
+  job.container = { ext: 'dash', playable: true };
+
+  (async () => {
+    try {
+      const container = await downloadDash(job, found);
+      job.playable = container.playable;
+      job.container = container;
+      job.status = 'done';
+      job.updatedAt = now();
+    } catch (err) {
+      job.status = job.cancelled ? 'cancelled' : 'error';
+      job.error = err.message;
+      job.updatedAt = now();
+      await removeDash(job.id);
+    }
+  })();
+
+  return jobView(job);
+}
+
+function createJob(id, title, url) {
+  const key = String(id);
   const job = {
     id: key,
     title: title ?? key,
@@ -391,8 +532,48 @@ export function startDownload({ id, title, url, referer, origin }) {
     cancelled: false,
   };
   jobs.set(key, job);
+  return job;
+}
 
-  if (!url) return jobView(job);
+/**
+ * Kick off a download. Returns the job view immediately; the work continues in
+ * the background and is polled through `jobFor`.
+ *
+ * With no `url` the job is only registered as `resolving` — the route uses that
+ * to claim the id while a headless browser looks for a stream, so the client
+ * polls one id from the first second instead of racing a second request.
+ */
+export function startDownload({ id, title, url, referer, origin, target = null }) {
+  const key = String(id);
+  if (!key) throw new Error('id required');
+
+  const existing = jobs.get(key);
+  const active = existing && !['error', 'cancelled', 'done', 'resolving'].includes(existing.status);
+  if (active) return jobView(existing);
+
+  const job = createJob(key, title, url);
+
+  if (!url) {
+    if (!target) return jobView(job);
+
+    (async () => {
+      try {
+        const container = await downloadAuto(job, target);
+        job.playable = container.playable;
+        job.container = container;
+        job.status = 'done';
+        job.updatedAt = now();
+      } catch (err) {
+        job.status = job.cancelled ? 'cancelled' : 'error';
+        job.error = err.message;
+        job.updatedAt = now();
+        await rm(job.tempPath, { force: true }).catch(() => {});
+        await removeDash(job.id);
+      }
+    })();
+
+    return jobView(job);
+  }
 
   const headers = referer ? { referer, origin: origin ?? new URL(referer).origin } : {};
 

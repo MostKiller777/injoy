@@ -1,5 +1,6 @@
 import { imgProxy } from './images.js';
 import { SERIES_DATA } from './series-data.js';
+import { tmdbForImdb } from './tmdb-ids.js';
 
 /**
  * Series shelf. Same contract as the film shelves: frozen metadata, ids in a
@@ -151,6 +152,24 @@ export function seriesSources(id) {
   const s = Number(season) || 1;
   const e = Number(episode) || 1;
   return { id, sources: episodeSources(show, s, e) };
+}
+
+/**
+ * What the stream resolver needs to find an episode: a TMDB id (the working
+ * provider keys on it), the IMDb id as a fallback, and the episode coordinates.
+ */
+export function seriesStreamTarget(id) {
+  const [kind, raw, season, episode] = String(id).split(':');
+  if (kind !== 'tv' || !raw) return null;
+  const show = BY_TVMAZE.get(raw);
+  if (!show) return null;
+  return {
+    imdbId: show.imdbId ?? null,
+    tmdbId: tmdbForImdb(show.imdbId),
+    season: Number(season) || 1,
+    episode: Number(episode) || 1,
+    title: show.title,
+  };
 }
 
 const normalizeName = (value) => String(value ?? '')

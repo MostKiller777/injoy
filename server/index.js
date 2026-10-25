@@ -12,8 +12,10 @@ import { isAllowedImage } from './lib/images.js';
 import { dataPath, dataRoot } from './lib/paths.js';
 import * as catalog from './lib/catalog.js';
 import { allMedia, loadMedia, mediaFor, mediaStats, removeMedia, serveMedia } from './lib/media.js';
-import { allJobs, cancelDownload, failJob, jobFor, startDownload } from './lib/downloader.js';
-import { resolveStream } from './lib/resolver.js';
+import { allJobs, cancelDownload, jobFor, startDashDownload, startDownload } from './lib/downloader.js';
+import { createDashSession, openDashSession, readSegment, resolveDashTracks } from './lib/dash.js';
+import { dashSession, readDashSegment } from './lib/dashstore.js';
+import { seriesStreamTarget } from './lib/series.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 loadEnv(join(ROOT, '.env'));
@@ -80,6 +82,48 @@ function json(res, status, payload, extra = {}) {
 function fail(res, status, message) {
   json(res, status, { error: message, status });
 }
+
+/**
+ * Where the resolver should look for a title: films carry a TMDB id on their
+ * detail record, series episodes carry theirs in the frozen IMDb map.
+ */
+function streamTarget(id, meta = null) {
+  const [kind, raw, season, episode] = String(id).split(':');
+  if (kind === 'tv') {
+    const target = seriesStreamTarget(id);
+    return target
+      ? { tmdbId: target.tmdbId, imdbId: target.imdbId, season: target.season, episode: target.episode }
+      : null;
+  }
+  return {
+    tmdbId: meta?.tmdbId ?? raw ?? null,
+    imdbId: meta?.imdbId ?? null,
+    season: null,
+    episode: null,
+  };
+}
+
+/**
+ * The catalog keys series by show (`tv:<tvmazeId>`); an episode id carries two
+ * more segments. Metadata lives on the show, so look it up without the coords.
+ */
+function baseIdFor(id) {
+  const parts = String(id).split(':');
+  return parts[0] === 'tv' ? parts.slice(0, 2).join(':') : String(id);
+}
+
+// Background caching is a courtesy, not a promise: one at a time, and only
+// while the media folder stays under its budget.
+const CACHE_MAX_BYTES = Number(process.env.MEDIA_CACHE_GB ?? 40) * 1024 ** 3;
+const CACHE_CONCURRENCY = 1;
+
+function cacheSlotAvailable() {
+  const active = allJobs().filter((job) => ['resolving', 'downloading', 'finalizing'].includes(job.status));
+  return active.length < CACHE_CONCURRENCY && mediaStats().bytes < CACHE_MAX_BYTES;
+}
+
+// One resolver run per title, even when several tabs press play together.
+const playInflight = new Map();
 
 async function readBody(req, limit = 262_144) {
   const chunks = [];
@@ -267,7 +311,7 @@ async function handleApi(req, res, url) {
       library: { watchlist: store.list().length, progress: Object.keys(store.allProgress()).length },
       media: mediaStats(),
       dataDir: dataRoot(),
-      version: '1.1.0',
+      version: '1.2.0',
     });
   }
 
@@ -340,6 +384,133 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // one playable source, chosen here — the visitor never picks and never downloads
+  const playMatch = /^\/api\/play\/(.+)$/.exec(pathname);
+  if (playMatch && method === 'GET') {
+    const id = decodeURIComponent(playMatch[1]);
+
+    // A copy on disk always wins: it seeks, it resumes, it needs no network.
+    const media = mediaFor(id);
+    if (media) {
+      if (media.kind === 'dash') {
+        const session = await dashSession(id);
+        if (session) {
+          return json(res, 200, {
+            id,
+            mode: 'local',
+            source: {
+              provider: 'local',
+              label: 'Downloaded',
+              kind: 'direct',
+              container: 'dash',
+              quality: session.video.height ? `${session.video.height}p` : 'source',
+              duration: session.duration ?? null,
+              session,
+            },
+          });
+        }
+      } else {
+        return json(res, 200, {
+          id,
+          mode: 'local',
+          source: {
+            provider: 'local',
+            label: 'Downloaded',
+            kind: 'direct',
+            container: media.ext,
+            quality: 'source',
+            url: `/api/stream/${encodeURIComponent(id)}`,
+            bytes: media.bytes,
+            duration: media.duration ?? null,
+          },
+        });
+      }
+    }
+
+    const meta = await catalog.detail(baseIdFor(id)).catch(() => null);
+    if (!meta) return fail(res, 404, 'title not found');
+    const target = streamTarget(id, meta);
+    if (!target) return fail(res, 404, 'title not found');
+
+    let pending = playInflight.get(id);
+    if (!pending) {
+      pending = resolveDashTracks(target).catch((err) => ({ ok: false, error: err.message }));
+      playInflight.set(id, pending);
+      pending.finally(() => playInflight.delete(id));
+    }
+    const found = await pending;
+
+    if (found.ok) {
+      const session = createDashSession(id, found);
+      let caching = false;
+      if (cacheSlotAvailable()) {
+        const job = startDashDownload({ id, title: meta.title ?? id, found });
+        caching = ['resolving', 'downloading', 'finalizing'].includes(job.status);
+      }
+      return json(res, 200, {
+        id,
+        mode: 'live',
+        caching,
+        source: {
+          provider: 'direct',
+          label: 'injoy',
+          kind: 'direct',
+          container: 'dash',
+          quality: found.video.height ? `${found.video.height}p` : 'auto',
+          duration: found.duration,
+          session,
+        },
+      });
+    }
+
+    // No direct stream: hand the player one embed, still without a picker.
+    const data = await catalog.sources(id).catch(() => null);
+    const fallback = (data?.sources ?? []).find((source) => source.kind === 'embed');
+    if (!fallback) return fail(res, 502, found.error ?? 'no source available');
+    return json(res, 200, { id, mode: 'embed', source: fallback });
+  }
+
+  // direct DASH: resolve an embed page to a manifest, then proxy its segments
+  const dashSegMatch = /^\/api\/dash\/seg\/([^/]+)\/(video|audio)\/(\d+)$/.exec(pathname);
+  if (dashSegMatch && method === 'GET') {
+    const [, sid, track, index] = dashSegMatch;
+    const segment = await readSegment(sid, track, Number(index));
+    if (segment.error) return fail(res, segment.status ?? 502, segment.error);
+    res.writeHead(200, {
+      'content-type': segment.contentType,
+      'content-length': segment.bytes.length,
+      'cache-control': segment.cacheControl ?? 'private, max-age=300',
+      ...SECURITY_HEADERS,
+    });
+    return res.end(segment.bytes);
+  }
+
+  const dashMatch = /^\/api\/dash\/(.+)$/.exec(pathname);
+  if (dashMatch && method === 'GET') {
+    const id = decodeURIComponent(dashMatch[1]);
+    const meta = await catalog.detail(id).catch(() => null);
+    const target = streamTarget(id, meta);
+    if (!target) return fail(res, 404, 'title not found');
+    const session = await openDashSession({ id, ...target });
+    if (!session.ok) return fail(res, 502, session.error ?? 'no direct stream');
+    return json(res, 200, { id, ...session });
+  }
+
+  // downloaded DASH segments, straight off the disk
+  const localSegMatch = /^\/api\/local-dash\/([^/]+)\/seg\/(video|audio)\/(\d+)$/.exec(pathname);
+  if (localSegMatch && method === 'GET') {
+    const [, rawId, track, index] = localSegMatch;
+    const bytes = await readDashSegment(decodeURIComponent(rawId), track, Number(index));
+    if (!bytes) return fail(res, 404, 'segment not on disk');
+    res.writeHead(200, {
+      'content-type': 'video/iso.segment',
+      'content-length': bytes.length,
+      'cache-control': 'public, max-age=31536000, immutable',
+      ...SECURITY_HEADERS,
+    });
+    return res.end(bytes);
+  }
+
   // local media: what is on disk, plus anything mid-download
   if (pathname === '/api/local' && method === 'GET') {
     return json(res, 200, { items: allMedia(), jobs: allJobs(), stats: mediaStats() });
@@ -359,12 +530,16 @@ async function handleApi(req, res, url) {
     if (method === 'GET') {
       const job = jobFor(id);
       const media = mediaFor(id);
+      // A finished download changes the play payload; do not let a cached
+      // source list hide the local copy.
+      if (media) cache.drop(`sources:${id}`);
       return json(res, 200, { id, job, media });
     }
 
     if (method === 'DELETE') {
       cancelDownload(id);
       const removed = await removeMedia(id);
+      cache.drop(`sources:${id}`);
       return json(res, 200, { removed });
     }
 
@@ -377,37 +552,15 @@ async function handleApi(req, res, url) {
         return json(res, 202, { id, job });
       }
 
-      // No URL supplied: resolve one from the embed chain first. This is the
-      // slow path — a headless browser per provider — so the job is registered
-      // as `resolving` before the search starts and the client polls the same
-      // endpoint the whole way through.
-      const meta = await catalog.detail(id).catch(() => null);
+      // No URL supplied: the site resolves and caches the title itself. The
+      // visitor never sees this route; it exists for the library view and for
+      // a manual re-cache from the admin surface.
+      const meta = await catalog.detail(baseIdFor(id)).catch(() => null);
       if (!meta) return fail(res, 404, 'title not found');
+      const target = streamTarget(id, meta);
+      if (!target) return fail(res, 404, 'title not found');
 
-      const tmdbId = meta.tmdbId ?? String(id).replace(/^tmdb:/, '');
-      const imdbId = meta.imdbId ?? null;
-      const [kind, , season, episode] = String(id).split(':');
-
-      const job = startDownload({ id, title: meta.title ?? title });
-
-      resolveStream({
-        tmdbId,
-        imdbId,
-        season: kind === 'tv' ? Number(season) || 1 : null,
-        episode: kind === 'tv' ? Number(episode) || 1 : null,
-      }).then((found) => {
-        if (!found.url) {
-          failJob(id, found.error ?? 'no provider produced a stream');
-          return;
-        }
-        startDownload({
-          id,
-          title: meta.title ?? title,
-          url: found.url,
-          referer: found.referer,
-        });
-      }).catch((err) => failJob(id, err.message));
-
+      const job = startDownload({ id, title: meta.title ?? title, target });
       return json(res, 202, { id, job, resolving: true });
     }
   }

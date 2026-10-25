@@ -59,6 +59,12 @@ export class Cache {
     return task;
   }
 
+  /** Drop one key — a completed download must not hide behind a cached shelf. */
+  drop(key) {
+    this.entries.delete(key);
+    this.inflight.delete(key);
+  }
+
   stats() {
     return { size: this.entries.size, inflight: this.inflight.size, hits: this.hits, misses: this.misses };
   }

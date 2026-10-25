@@ -71,6 +71,11 @@ export const startDownload = (id, title) => api(`/api/download/${encodeURICompon
 export const cancelDownload = (id) => api(`/api/download/${encodeURIComponent(id)}`, { method: 'DELETE' });
 export const getDetail = (id, signal) => api(`/api/movie/${encodeURIComponent(id)}`, { signal });
 export const getSources = (id, signal) => api(`/api/sources/${encodeURIComponent(id)}`, { signal });
+export const getPlay = (id, signal) => api(`/api/play/${encodeURIComponent(id)}`, {
+  signal,
+  timeout: 90_000,
+  retries: 0,
+});
 export const getRandom = () => api('/api/random');
 
 export const getWatchlist = () => api('/api/watchlist', { cache: 'no-store' });

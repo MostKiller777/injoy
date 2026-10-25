@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { dataPath } from './paths.js';
+import { dashBytes, dashDir, readDashManifest, removeDash } from './dashstore.js';
 import { probeTsDuration } from './tsprobe.js';
 
 /**
@@ -59,6 +60,13 @@ export async function loadMedia() {
   try {
     const parsed = JSON.parse(await readFile(MANIFEST(), 'utf8'));
     for (const [id, entry] of Object.entries(parsed?.items ?? {})) {
+      // A downloaded DASH title is a directory of segments, not one file.
+      if (entry.kind === 'dash') {
+        const manifest = await readDashManifest(id);
+        if (!manifest) continue;
+        entries.set(id, { ...entry, duration: manifest.duration ?? entry.duration ?? null });
+        continue;
+      }
       // A manifest entry with no file on disk is a stale download, not a hit.
       const info = await stat(entry.file).catch(() => null);
       if (!info) continue;
@@ -92,7 +100,7 @@ function flush() {
   dirty = false;
   const snapshot = JSON.stringify({ items: Object.fromEntries(entries) }, null, 2);
   flushChain = flushChain.then(async () => {
-    await mkdir(ROOT, { recursive: true });
+    await mkdir(dirname(MANIFEST()), { recursive: true });
     const tmp = `${MANIFEST()}.${process.pid}.tmp`;
     await writeFile(tmp, snapshot, 'utf8');
     await rename(tmp, MANIFEST());
@@ -124,6 +132,28 @@ export async function registerMedia(entry) {
   return record;
 }
 
+export async function registerDash({ id, title, duration = null, segments = 0 }) {
+  const key = String(id);
+  const bytes = await dashBytes(key);
+  const record = {
+    id: key,
+    title: title ?? key,
+    kind: 'dash',
+    dir: dashDir(key),
+    ext: 'dash',
+    mime: 'application/dash+xml',
+    bytes,
+    duration: duration ?? null,
+    segments,
+    source: 'download',
+    createdAt: Date.now(),
+  };
+  entries.set(key, record);
+  touch();
+  await flush();
+  return record;
+}
+
 export async function removeMedia(id) {
   const key = String(id);
   const record = entries.get(key);
@@ -131,7 +161,11 @@ export async function removeMedia(id) {
   entries.delete(key);
   touch();
   await flush();
-  await rm(record.file, { force: true }).catch(() => {});
+  if (record.kind === 'dash') {
+    await removeDash(key);
+  } else {
+    await rm(record.file, { force: true }).catch(() => {});
+  }
   return true;
 }
 
@@ -145,6 +179,14 @@ export async function serveMedia(req, res, id) {
   if (!record) {
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'not downloaded' }));
+    return;
+  }
+
+  // A DASH download is a directory of segments; the player fetches those
+  // through /api/local-dash. One file cannot represent it.
+  if (record.kind === 'dash') {
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'dash media is served per segment' }));
     return;
   }
 

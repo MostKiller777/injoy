@@ -3,6 +3,7 @@ import { embedSources } from './providers.js';
 import { imgProxy } from './images.js';
 import { CURATED_ITEMS, curatedDetail, curatedFeatured, curatedSearch } from './curated.js';
 import { seriesDetail, seriesItems, seriesSearch, seriesSources } from './series.js';
+import { dashSession } from './dashstore.js';
 import { mediaFor } from './media.js';
 
 const MINUTE = 60_000;
@@ -305,18 +306,34 @@ export async function sources(id) {
 
   // A downloaded copy always wins: it seeks, it resumes, it needs no embed.
   const local = mediaFor(id);
-  const localSource = local
-    ? [{
+  let localSource = [];
+
+  if (local?.kind === 'dash') {
+    const session = await dashSession(id);
+    if (session) {
+      localSource = [{
+        provider: 'local',
+        label: 'Downloaded',
+        kind: 'direct',
+        quality: session.video.height ? `${session.video.height}p` : 'source',
+        container: 'dash',
+        session,
+        duration: session.duration ?? null,
+        url: `local-dash:${id}`,
+      }];
+    }
+  } else if (local) {
+    localSource = [{
       provider: 'local',
-      label: 'Local file',
+      label: 'Downloaded',
       kind: 'direct',
-      quality: local.ext === '.ts' ? 'auto' : 'source',
+      quality: 'source',
       url: `/api/stream/${encodeURIComponent(id)}`,
       bytes: local.bytes,
       container: local.ext,
       duration: local.duration ?? null,
-    }]
-    : [];
+    }];
+  }
 
   if (kind === 'tv' && raw) {
     const data = seriesSources(id);

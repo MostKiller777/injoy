@@ -1,6 +1,6 @@
 ﻿# injoy
 
-A cinema-grade streaming front end with **zero npm dependencies**. It boots on a bare Node 20 install with a hand-picked modern catalog in eight genre rails plus a full series shelf, and every title plays through multi-provider embeds — or from disk, once downloaded.
+A cinema-grade streaming front end with **zero npm dependencies**. It boots on a bare Node 20 install with a hand-picked modern catalog in eight genre rails plus a full series shelf. Every title is resolved server-side, streamed direct through DASH, and cached to the box in the background so the next play comes off local disk — no source picker, no visitor downloads.
 
 ```
 npm start          # http://127.0.0.1:6967
@@ -27,18 +27,20 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - The Mentalist leads the home Series row: 7 seasons, 151 episodes.
 
 **Playback**
-- Titles fan out across nine public embed providers with a source picker; switching sources never loses your place in the UI, and embeds offer reload plus open-in-new-tab.
-- Series episodes fan out across four IMDb-keyed providers, ordered the same way.
+- One source, chosen by the server: the player never shows a picker and the visitor never downloads anything. `/api/play/:id` answers with a local copy when one exists, otherwise a direct DASH stream, otherwise one embed.
+- Direct streams are DASH: one HEVC video track, one AAC audio track. The client plays them through Media Source Extensions with two SourceBuffers, a bounded eight-segment look-ahead and a rebuild on out-of-range seeks — no muxer, no ffmpeg.
+- If a direct stream fails or the browser cannot decode HEVC, the player falls back to the first embed on its own. No dead ends, no source list.
 - Player chrome: glass head with title and year, centre play button when paused, buffering spinner on stall, single-click play/pause, double-click fullscreen, and a `?` keyboard panel.
 - Progress is written on pause, on close, and on tab hide. Resume is offered automatically past the 20-second mark.
-- A downloaded title becomes the first source in the picker, so the player opens a local file with native seeking instead of an iframe.
 
 **Downloads**
-- `POST /api/download/<id>` with a `url` starts a download; with no body it resolves one first: headless Chrome opens the embed pages, the provider's own JS trades its short-lived token, and the request it makes for a manifest is read back out of Chrome's netlog. The URL is never constructed, only observed.
+- Playback also caches: the same resolver run that starts a direct stream hands its tracks to the downloader, which saves every fragment to disk in the background. The next play of that title comes off the disk — `mode: "local"` — with no third-party request at all.
+- `POST /api/download/<id>` still exists for the library view and manual re-caching; with no body it resolves and caches the title itself.
+- DASH is stored as the provider served it: `data/media/dash/<id>/{video,audio}/init.mp4` plus one `.m4s` per five seconds, described by a `manifest.json`. The client's MSE feeder points at `/api/local-dash/<id>/seg/...` instead of the network, so playback code is identical live and local.
 - HLS is handled in full — master-playlist variant selection, `#EXT-X-MAP` init segments, AES-128 keys with explicit or sequence-number IVs, and `#EXT-X-BYTERANGE` sub-ranges. Segments download six at a time but always write in playlist order.
 - Raw `.ts` downloads play through a Media Source Extensions feeder: a bounded read-ahead window (45 s), a byte↔time checkpoint index for backward seeks, and a byte-offset estimate for forward seeks. The duration comes from a PES timestamp scan (`server/lib/tsprobe.js`), so the scrubber spans the film.
-- Files live in `data/media/`, indexed by `data/media.json`, served by `/api/stream/<id>` with `206` range responses so seeking works.
-- DASH manifests are rejected with a named error rather than saved: their video and audio are separate tracks and joining them needs a muxer this box does not ship.
+- Files live in `data/media/`, indexed by `data/media.json`; single-file downloads are served by `/api/stream/<id>` with `206` range responses so seeking works.
+- Background caching runs one title at a time and stops at `MEDIA_CACHE_GB` (default 40 GB) of stored media. Playback is unaffected when the budget is full — the stream just stays live.
 - Requires Chrome or Edge for the resolver. Downloads are otherwise dependency-free.
 
 **UI**
@@ -46,7 +48,7 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - Draggable, snap-scrolling rails with arrow controls and edge-aware disabled states.
 - Genre rails in catalog order: Noir, Horror, Sci-Fi, Comedy, Drama, Western, Animation, Documentary.
 - Dedicated `#/series` page listing every show with its season and episode counts.
-- Detail modal: synopsis, facts, cast strip, sources, trailer, episode browser, "more like this".
+- Detail modal: synopsis, facts, cast strip, trailer, episode browser, "more like this".
 - Infinite-scroll grids for browse and search.
 - Watchlist and resume points mirrored to the server in `data/library.json`, seeded from `localStorage` so the UI stays instant.
 - Keyboard: `/` search, `R` random film, `Esc` close, arrows seek, `Space`/`K` play-pause, `M` mute, `F` fullscreen, `?` shortcut panel.
@@ -123,7 +125,7 @@ It fetches `cloudflared` once, starts the server if it is not already up, and pr
 
 **Notes on hosting**
 
-- Downloads need Chrome or Edge for the resolver. The Docker image ships neither, so `POST /api/download/<id>` without a `url` answers `resolver unavailable` there. Downloads with an explicit `url` work everywhere — HLS and progressive are pure Node.
+- Direct playback and background caching need Chrome or Edge for the resolver. The Docker image ships neither, so `/api/play/:id` answers with an embed there and nothing is cached. Downloads with an explicit `url` work everywhere — HLS, progressive and DASH segment saving are pure Node.
 - The catalog is static files inside the image, so the free tiers of any host serve it fine; only the disk and the resolver care about the plan.
 - Cold starts on scale-to-zero hosts cost one Node boot (~200 ms) plus the first rail's cache fill.
 
@@ -180,11 +182,15 @@ injoy/
 | GET | `/api/browse?genre=&sort=&page=` | paged grid, 36 per page |
 | GET | `/api/genres` | the eight genre rails with counts |
 | GET | `/api/movie/:id` | full detail; id is `tmdb:550` or `tv:116` |
-| GET | `/api/sources/:id` | playable sources; `tmdb:550` or `tv:116:1:2` |
-| GET | `/api/local` | downloaded files, active jobs, totals |
-| GET/HEAD | `/api/stream/:id` | local file with `206` range support |
+| GET | `/api/sources/:id` | every source, local first; `tmdb:550` or `tv:116:1:2` |
+| GET | `/api/play/:id` | the one source the player should mount (local, DASH, or embed) |
+| GET | `/api/dash/:id` | resolve a live DASH session (`sid`, tracks, segment count) |
+| GET | `/api/dash/seg/:sid/:track/:n` | proxied provider segment |
+| GET | `/api/local-dash/:id/seg/:track/:n` | downloaded segment off the disk |
+| GET | `/api/local` | downloaded titles, active jobs, totals |
+| GET/HEAD | `/api/stream/:id` | local single-file download with `206` range support |
 | GET | `/api/download/:id` | job status plus the stored media record |
-| POST | `/api/download/:id` | `{ url, referer }` starts a download; no body resolves one first |
+| POST | `/api/download/:id` | `{ url, referer }` downloads a known URL; no body resolves and caches |
 | DELETE | `/api/download/:id` | cancel the job and delete the file |
 | GET | `/api/random` | surprise pick |
 | GET | `/api/img?u=` | image proxy, allowlisted to tmdb.org, ltrbxd.com, tvmaze.com |
@@ -199,7 +205,8 @@ injoy/
 
 ## Notes
 
-- **No media is hosted here.** Every title plays through a third-party embed, or from a file the download pipeline pulled off one. Provider availability is outside this repo's control — that is why the player ships with a source picker.
+- **No media is hosted here.** Every title streams from a public provider, or from the copy this server cached off one. The visitor never sees a source list: `/api/play/:id` picks the path. Provider availability is outside this repo's control.
+- Background caching is deliberately bounded: `MEDIA_CACHE_GB` (default `40`) caps the stored bytes, and one download runs at a time so playback keeps the bandwidth it needs.
 - The catalog is static metadata files on purpose: TMDB's API needs a key, its image CDN does not, so the site keeps a complete, playable front page with zero configuration. TVMaze is keyless, which is why the series shelf is built from it.
 - `data/library.json` and `data/media.json` are the only mutable state. Delete them to reset the library and the download index; `data/media/` holds the files themselves.
 - CSP allows `frame-src https:` and `img-src https:` because embeds and artwork are external. Scripts stay same-origin.

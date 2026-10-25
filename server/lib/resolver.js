@@ -119,35 +119,36 @@ export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600 } 
 }
 
 function filmEmbeds(tmdbId, imdbId) {
-  const list = [
-    `https://vidsrc.to/embed/movie/${tmdbId}`,
-    `https://www.2embed.cc/embed/${tmdbId}`,
-    `https://vidsrc.me/embed/movie?tmdb=${tmdbId}`,
-    `https://vidlink.pro/movie/${tmdbId}`,
-  ];
+  const list = [];
+  // vidlink answers in a few seconds and hands back a real manifest; the rest
+  // are slower and mostly return nothing, so they only ever run as fallbacks.
+  if (tmdbId) list.push(`https://vidlink.pro/movie/${tmdbId}`);
+  list.push(`https://vidsrc.to/embed/movie/${tmdbId}`);
+  list.push(`https://www.2embed.cc/embed/${tmdbId}`);
+  list.push(`https://vidsrc.me/embed/movie?tmdb=${tmdbId}`);
   if (imdbId) list.push(`https://www.2embed.cc/embed/${imdbId}`);
   return list;
 }
 
 function episodeEmbeds(tmdbId, imdbId, season, episode) {
   const list = [];
+  if (tmdbId) list.push(`https://vidlink.pro/tv/${tmdbId}/${season}/${episode}`);
   if (imdbId) {
     list.push(`https://vidsrc.to/embed/tv?imdb=${imdbId}&season=${season}&episode=${episode}`);
     list.push(`https://www.2embed.cc/embedtv/${imdbId}&s=${season}&e=${episode}`);
   }
-  list.push(`https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`);
-  list.push(`https://www.2embed.cc/embedtv/${tmdbId}&s=${season}&e=${episode}`);
+  if (tmdbId) {
+    list.push(`https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}`);
+    list.push(`https://www.2embed.cc/embedtv/${tmdbId}&s=${season}&e=${episode}`);
+  }
   return list;
 }
 
 /**
- * Try each embed page in turn until one produces a manifest. Each attempt is a
- * fresh headless browser, so a dead provider costs one timeout, not the job.
- *
- * HLS wins over DASH even when it turns up later: a DASH stream keeps video and
- * audio in separate tracks, and joining them needs a muxer this box does not
- * have. A DASH hit is kept only as a last resort so the caller can report
- * something specific.
+ * Try each embed page in turn until one produces a media request. Each attempt
+ * is a fresh headless browser, so a dead provider costs one timeout, not the
+ * job. The first hit wins: DASH plays through MSE, HLS and MP4 through the
+ * native element, so there is no reason to keep hunting once one lands.
  */
 export async function resolveStream({ tmdbId, imdbId = null, season = null, episode = null, onAttempt = null }) {
   const pages = season && episode
@@ -155,17 +156,13 @@ export async function resolveStream({ tmdbId, imdbId = null, season = null, epis
     : filmEmbeds(tmdbId, imdbId);
 
   const tried = [];
-  let fallback = null;
 
   for (const page of pages) {
     onAttempt?.(page);
     const result = await sniffStream(page);
     tried.push({ page, ...result });
-    if (!result.url) continue;
-    if (result.type === 'hls' || /\.mp4(?:$|\?)/i.test(result.url)) return { ...result, page, tried };
-    fallback ??= { ...result, page };
+    if (result.url) return { ...result, page, tried };
   }
 
-  if (fallback) return { ...fallback, tried };
   return { error: 'no provider produced a stream', tried };
 }

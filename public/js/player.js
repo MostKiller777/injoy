@@ -1,11 +1,11 @@
-import { getSources } from './api.js';
+import { getPlay, getSources } from './api.js';
+import { createDashFeeder } from './dash.js';
 import {
   progressFor,
   rememberShown,
   saveProgress,
   setSourcePreference,
   setVolume,
-  sourcePreference,
   state,
 } from './state.js';
 import { el, formatTime, icon, toast } from './ui.js';
@@ -419,9 +419,6 @@ export async function openPlayer(item, preferredProvider = null) {
     on: { click: () => closePlayer() },
   }, icon('close'));
 
-  const sourceButton = el('button', { class: 'pill-select', type: 'button', 'aria-label': 'Choose source' },
-    icon('source'), el('span', { text: 'Source' }), icon('down'));
-
   const titleChip = el('div', { class: 'player-title' },
     el('h2', { text: item.title }),
     item.year ? el('span', { class: 'chip subtle', text: String(item.year) }) : null,
@@ -431,7 +428,6 @@ export async function openPlayer(item, preferredProvider = null) {
     titleChip,
     headMeta,
     el('div', { class: 'spacer' }),
-    sourceButton,
     closeButton,
   );
 
@@ -588,45 +584,6 @@ export async function openPlayer(item, preferredProvider = null) {
   on(player, 'pointerdown', wakeChrome);
   on(document, 'keydown', wakeChrome);
 
-  const sourceMenu = el('div', { class: 'source-menu', role: 'menu', hidden: true });
-  player.append(sourceMenu);
-
-  const toggleSourceMenu = (force) => {
-    const open = force ?? sourceMenu.hidden;
-    if (!open) {
-      sourceMenu.hidden = true;
-      return;
-    }
-    sourceMenu.replaceChildren(
-      el('h3', { text: 'Sources' }),
-      ...sources.map((source, index) =>
-        el('button', {
-          type: 'button',
-          class: current === source ? 'is-active' : '',
-          on: {
-            click: () => {
-              sourceMenu.hidden = true;
-              mountSource(index);
-            },
-          },
-        },
-          el('span', {},
-            el('span', { text: source.label }),
-            el('small', { text: source.kind === 'direct' ? 'native player · resume enabled' : 'third-party embed' }),
-          ),
-          current === source ? el('span', { class: 'tick', text: '✓' }) : null,
-        )),
-    );
-    sourceMenu.hidden = false;
-  };
-
-  sourceButton.addEventListener('click', () => toggleSourceMenu());
-  on(document, 'pointerdown', (event) => {
-    if (!sourceMenu.hidden && !sourceMenu.contains(event.target) && !sourceButton.contains(event.target)) {
-      sourceMenu.hidden = true;
-    }
-  });
-
   const buildDirectControls = () => {
     const seekFill = el('div', { class: 'seek-fill' });
     const seekBuffer = el('div', { class: 'seek-buffer' });
@@ -776,8 +733,6 @@ export async function openPlayer(item, preferredProvider = null) {
         el('div', { class: 'volume-wrap' }, muteButton, volume),
         speedButton,
         el('div', { class: 'ctrl-spacer' }),
-        el('button', { class: 'pill-select', type: 'button', 'aria-label': 'Choose source', on: { click: () => toggleSourceMenu() } },
-          icon('source'), el('span', { text: current?.label ?? 'Source' })),
         pipButton,
         el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Keyboard shortcuts', on: { click: () => toggleKeys(true) } }, icon('help')),
         fsButton,
@@ -792,8 +747,6 @@ export async function openPlayer(item, preferredProvider = null) {
   const buildEmbedControls = () => {
     controls.replaceChildren(
       el('div', { class: 'controls-row' },
-        el('button', { class: 'pill-select', type: 'button', on: { click: () => toggleSourceMenu() } },
-          icon('source'), el('span', { text: current?.label ?? 'Source' }), icon('down')),
         el('button', {
           class: 'pill-select', type: 'button',
           on: {
@@ -804,16 +757,28 @@ export async function openPlayer(item, preferredProvider = null) {
             },
           },
         }, el('span', { text: 'Reload' })),
-        el('a', {
-          class: 'pill-select', href: current?.url ?? '#', target: '_blank', rel: 'noopener noreferrer',
-          'aria-label': 'Open this source in a new tab, outside the ad sandbox',
-        }, el('span', { text: 'New tab · ads' }), icon('external')),
         el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Keyboard shortcuts', on: { click: () => toggleKeys(true) } }, icon('help')),
         el('div', { class: 'ctrl-spacer' }),
         el('button', { class: 'ctrl', type: 'button', 'data-fs': '', 'aria-label': 'Fullscreen', on: { click: toggleFullscreen } }, icon('fullscreen')),
       ),
     );
     player.classList.remove('is-hidden-chrome');
+  };
+
+  /**
+   * No picker, no dead end: if the direct stream fails the player drops to the
+   * first embed on its own. The visitor only ever presses play.
+   */
+  const fallbackToEmbed = async (message) => {
+    const alt = await getSources(item.playId ?? item.id).catch(() => null);
+    const embed = (alt?.sources ?? []).find((entry) => entry.kind === 'embed');
+    if (embed) {
+      sources = [embed];
+      toast('Switched to the backup player', 'warn');
+      mountSource(0);
+      return;
+    }
+    showStatus('Stream unavailable', message, false);
   };
 
   const mountSource = (index) => {
@@ -828,7 +793,9 @@ export async function openPlayer(item, preferredProvider = null) {
     player.classList.remove('is-hidden-chrome');
     headMeta.textContent = source.kind !== 'direct'
       ? 'Third-party source'
-      : source.provider === 'local' ? 'Local file' : 'Archive · direct';
+      : source.provider === 'local'
+        ? 'Local file'
+        : source.container === 'dash' ? 'Direct stream' : 'Archive · direct';
     clearInterval(saveTimer);
     video = null;
     iframe = null;
@@ -854,6 +821,13 @@ export async function openPlayer(item, preferredProvider = null) {
       const resumePoint = resume && resume.t > 20 && (!resume.duration || resume.t < resume.duration - 40)
         ? resume.t
         : null;
+
+      if (source.container === 'dash' && source.session) {
+        detachStream = createDashFeeder(video, source.session, {
+          startAt: resumePoint ?? 0,
+          onError: (err) => { fallbackToEmbed(err.message); },
+        });
+      }
 
       if (isTransportStream) {
         detachStream = createTransportStreamFeeder(video, source.url, {
@@ -899,23 +873,14 @@ export async function openPlayer(item, preferredProvider = null) {
           flashNote(`Resumed at ${formatTime(resume.t)}`, 3400);
         }
         if (Number.isFinite(video.duration) && video.duration > 0) {
-          headMeta.textContent = `${local ? 'Local file' : 'Archive · direct'} · ${formatTime(video.duration)}`;
+          const kindLabel = local ? 'Local file' : source.container === 'dash' ? 'Direct stream' : 'Archive · direct';
+          headMeta.textContent = `${kindLabel} · ${formatTime(video.duration)}`;
         }
         tryPlay(video);
       }, { once: true });
 
       on(video, 'error', () => {
-        const fallback = sources.findIndex((entry) => entry.kind === 'embed');
-        if (fallback !== -1 && fallback !== index) {
-          toast('Direct stream failed — switching to embed', 'warn');
-          mountSource(fallback);
-        } else {
-          showStatus('Stream unavailable', 'The archive file did not respond. Try another source.', false);
-          stage.append(el('button', {
-            class: 'btn btn-ghost btn-mini', type: 'button',
-            on: { click: () => toggleSourceMenu(true) },
-          }, 'Choose a source'));
-        }
+        fallbackToEmbed('The archive file did not respond.');
       });
 
       saveTimer = setInterval(persist, SAVE_INTERVAL);
@@ -955,14 +920,17 @@ export async function openPlayer(item, preferredProvider = null) {
 
   /* ------------------------------ boot -------------------------------- */
 
-  showStatus('Finding a source', `Preparing “${item.title}”`);
-  headMeta.textContent = 'resolving…';
+  showStatus('Preparing stream', `Preparing “${item.title}”`);
+  headMeta.textContent = 'preparing…';
 
-  let payload;
-  try {
-    payload = await getSources(item.playId ?? item.id);
-  } catch (err) {
-    showStatus('Could not resolve a source', err.message, false);
+  // The server decides everything: a local copy, a live direct stream, or one
+  // embed. There is no source list in the player and nothing for the visitor
+  // to pick.
+  const playId = item.playId ?? item.id;
+  const payload = await getPlay(playId).catch((err) => ({ error: err }));
+
+  if (payload.error) {
+    showStatus('Could not start playback', payload.error.message, false);
     stage.append(el('button', {
       class: 'btn btn-ghost btn-mini', type: 'button',
       on: { click: () => { closePlayer(); openPlayer(item, preferredProvider); } },
@@ -970,17 +938,35 @@ export async function openPlayer(item, preferredProvider = null) {
     return;
   }
 
-  sources = payload.sources ?? [];
-  if (!sources.length) {
-    showStatus('No sources yet', 'This title has no playable source configured.', false);
+  const source = payload.source;
+  if (!source) {
+    showStatus('No stream yet', 'This title has no playable source right now.', false);
     return;
   }
 
-  // Preference is stored per title, so every episode of a show inherits it.
-  const preferred = preferredProvider || sourcePreference(item.id);
-  let initial = sources.findIndex((source) => source.provider === preferred);
-  if (initial === -1) initial = 0;
-  mountSource(initial);
+  // A browser without HEVC MSE cannot take the direct stream; drop to the
+  // embed before mounting instead of after a black frame.
+  if (source.container === 'dash' && source.session && !canPlayDash(source.session)) {
+    await fallbackToEmbed('This browser cannot decode the direct stream.');
+    return;
+  }
+
+  sources = [source];
+  mountSource(0);
+}
+
+/**
+ * DASH needs MSE and a decoder for both tracks. HEVC is the common case on the
+ * providers and Chrome only exposes it where the OS can decode it, so the check
+ * is made before the source is offered rather than after it fails.
+ */
+function canPlayDash(session) {
+  if (typeof MediaSource === 'undefined') return false;
+  try {
+    return MediaSource.isTypeSupported(session.video.mime) && MediaSource.isTypeSupported(session.audio.mime);
+  } catch {
+    return false;
+  }
 }
 
 export function closePlayer() {
