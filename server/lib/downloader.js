@@ -624,16 +624,6 @@ export function startDownload({ id, title, url, referer, origin, target = null }
   return jobView(job);
 }
 
-/** Mark a resolving job as failed, so the client stops polling. */
-export function failJob(id, message) {
-  const job = jobs.get(String(id));
-  if (!job) return false;
-  job.status = 'error';
-  job.error = message;
-  job.updatedAt = now();
-  return true;
-}
-
 /** File size on disk for a finished job, used by the health route. */
 export async function downloadSize(id) {
   const job = jobs.get(String(id));

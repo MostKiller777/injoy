@@ -64,13 +64,13 @@ const handlers = {
 };
 
 const detailHandlers = {
-  onPlay: (detail, provider) => {
+  onPlay: (detail) => {
     restoreBase();
     if (detail.kind === 'series' && !detail.playId) {
       playSeries(detail);
       return;
     }
-    openPlayer(detail, provider);
+    openPlayer(detail);
   },
   onLoaded: (detail) => {
     // Opening a show is a play intent: start it, leave the panel underneath.

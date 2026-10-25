@@ -4,7 +4,6 @@ import {
   progressFor,
   rememberShown,
   saveProgress,
-  setSourcePreference,
   setVolume,
   state,
 } from './state.js';
@@ -375,10 +374,11 @@ function tryPlay(video) {
 
 /**
  * Opens the fullscreen player.
- * Direct archive streams get a native <video> with resume + speed + PiP.
- * Everything else runs in a provider iframe with a source picker.
+ * Direct DASH streams get a native <video> fed by Media Source Extensions, with
+ * resume, speed and PiP. The single fallback is a provider iframe, mounted only
+ * when the direct path fails.
  */
-export async function openPlayer(item, preferredProvider = null) {
+export async function openPlayer(item) {
   if (!item?.id) return;
 
   rememberShown(item);
@@ -787,7 +787,6 @@ export async function openPlayer(item, preferredProvider = null) {
     detachStream?.();
     detachStream = null;
     current = source;
-    setSourcePreference(item.id, source.provider);
     stage.replaceChildren();
     controls.replaceChildren();
     player.classList.remove('is-hidden-chrome');
@@ -933,7 +932,7 @@ export async function openPlayer(item, preferredProvider = null) {
     showStatus('Could not start playback', payload.error.message, false);
     stage.append(el('button', {
       class: 'btn btn-ghost btn-mini', type: 'button',
-      on: { click: () => { closePlayer(); openPlayer(item, preferredProvider); } },
+      on: { click: () => { closePlayer(); openPlayer(item); } },
     }, 'Retry'));
     return;
   }

@@ -39,7 +39,7 @@ export const state = {
   watchlist: new Map(),
   progress: {},
   recent: [],
-  prefs: { source: {}, muted: false, volume: 1, quality: 'auto' },
+  prefs: { muted: false, volume: 1 },
   ready: false,
 };
 
@@ -241,15 +241,6 @@ export function saveProgress(id, t, d) {
 export function clearProgress(id) {
   delete state.progress[id];
   persistProgress();
-}
-
-export function setSourcePreference(id, provider) {
-  state.prefs.source[id] = provider;
-  persistPrefs();
-}
-
-export function sourcePreference(id) {
-  return state.prefs.source[id] ?? null;
 }
 
 export function setVolume(volume, muted) {
