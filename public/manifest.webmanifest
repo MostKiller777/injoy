@@ -1,0 +1,18 @@
+{
+  "name": "Injoy",
+  "short_name": "Injoy",
+  "description": "Cinema-grade streaming over the Internet Archive public-domain library.",
+  "start_url": "/#/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#06070b",
+  "theme_color": "#06070b",
+  "orientation": "any",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Films", "url": "/#/films" },
+    { "name": "My list", "url": "/#/list" }
+  ]
+}

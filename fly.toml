@@ -1,0 +1,37 @@
+# Fly.io config. `fly launch --no-deploy` then `fly deploy`, or create the
+# volume first and deploy:
+#   fly volumes create injoy_data --size 5 --region iad
+#   fly deploy
+app = "injoy"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "6967"
+  DATA_DIR = "/data"
+
+[http_service]
+  internal_port = 6967
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/api/health"
+
+[[mounts]]
+  source = "injoy_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

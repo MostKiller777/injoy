@@ -1,0 +1,27 @@
+# Render blueprint. Point Render at this repo, pick "Blueprint", and it reads
+# this file. The disk is what makes the library and downloads survive a
+# redeploy; Render's free plan does not offer disks, so `plan: starter` is
+# required for persistence. Drop the disk and the plan for a stateless demo.
+services:
+  - type: web
+    name: injoy
+    runtime: docker
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 6967
+      - key: DATA_DIR
+        value: /data
+      # Optional TMDB key. `sync: false` means Render prompts for it instead of
+      # storing it in the repo.
+      - key: TMDB_API_KEY
+        sync: false
+    disk:
+      name: injoy-data
+      mountPath: /data
+      sizeGB: 5

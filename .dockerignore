@@ -1,0 +1,9 @@
+data
+.git
+.gitignore
+.env
+*.log
+README.md
+Dockerfile
+render.yaml
+fly.toml

@@ -1,0 +1,15 @@
+{
+  "name": "injoy",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Curated streaming front end with zero npm dependencies: 500 films, 64 series, multi-provider playback, and a local download pipeline.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "check": "node --check server/index.js"
+  }
+}

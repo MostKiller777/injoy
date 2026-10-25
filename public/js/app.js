@@ -1,0 +1,573 @@
+import { getBrowse, getDetail, getGenres, getHome, getRandom, getSearch, getSeries } from './api.js';
+import {
+  continueCount,
+  listItems,
+  loadLocal,
+  nextUpEpisode,
+  recentItems,
+  subscribe,
+  syncLibrary,
+} from './state.js';
+import { openPlayer } from './player.js';
+import * as ui from './ui.js';
+import { el } from './ui.js';
+
+const view = document.getElementById('view');
+const hero = document.getElementById('hero');
+const searchForm = document.getElementById('search-form');
+const searchInput = document.getElementById('search-input');
+const randomButton = document.getElementById('random-btn');
+const topbar = document.getElementById('topbar');
+const footerMode = document.getElementById('footer-mode');
+
+let baseRoute = '#/';
+let routeAbort = null;
+let lastDetailId = null;
+let genresCache = null;
+let searchTimer = null;
+let booted = false;
+
+/* -------------------------------- handlers ------------------------------- */
+
+/**
+ * Hand a series straight to the player.
+ *
+ * Resumes the last watched episode (or starts at S1E1), and the player picks
+ * the first working source itself — opening a show never asks for an episode
+ * or a provider first.
+ */
+function playSeries(detail) {
+  const episode = nextUpEpisode(detail);
+  if (!episode) {
+    ui.toast('This series has no episodes yet', 'warn');
+    return false;
+  }
+  openPlayer({
+    ...detail,
+    playId: `${detail.id}:${episode.season}:${episode.number}`,
+    title: `${detail.title} — S${episode.season}E${episode.number} · ${episode.name}`,
+  });
+  return true;
+}
+
+const handlers = {
+  onOpen: (item) => {
+    location.hash = `#/movie/${encodeURIComponent(item.id)}`;
+  },
+  onPlay: (item) => {
+    if (item.kind === 'series') {
+      getDetail(item.id).then((detail) => playSeries(detail)).catch(() => openPlayer(item));
+      return;
+    }
+    openPlayer(item);
+  },
+};
+
+const detailHandlers = {
+  onPlay: (detail, provider) => {
+    restoreBase();
+    if (detail.kind === 'series' && !detail.playId) {
+      playSeries(detail);
+      return;
+    }
+    openPlayer(detail, provider);
+  },
+  onLoaded: (detail) => {
+    // Opening a show is a play intent: start it, leave the panel underneath.
+    if (detail.kind !== 'series') return;
+    if (document.getElementById('player-root')?.childElementCount) return;
+    playSeries(detail);
+  },
+  onClose: () => {
+    lastDetailId = null;
+    restoreBase();
+  },
+  replace: (id) => {
+    history.replaceState(null, '', `#/movie/${encodeURIComponent(id)}`);
+    lastDetailId = id;
+    ui.openDetail(id, detailHandlers);
+  },
+};
+
+function restoreBase() {
+  if (location.hash.startsWith('#/movie/')) {
+    history.replaceState(null, '', baseRoute || '#/');
+  }
+}
+
+/* --------------------------------- router -------------------------------- */
+
+function route() {
+  const hash = location.hash || '#/';
+
+  if (hash.startsWith('#/movie/')) {
+    const id = decodeURIComponent(hash.slice('#/movie/'.length));
+    if (!view.childElementCount) {
+      renderHome()
+        .catch(() => {})
+        .finally(() => openDetailRoute(id));
+      return;
+    }
+    openDetailRoute(id);
+    return;
+  }
+
+  baseRoute = hash;
+  lastDetailId = null;
+  routeAbort?.abort();
+  const controller = new AbortController();
+  routeAbort = controller;
+
+  ui.closeDetail();
+  window.scrollTo(0, 0);
+
+  const [path, query] = hash.slice(1).split('?');
+  const params = new URLSearchParams(query ?? '');
+  setActiveNav(path);
+
+  const titles = { '/films': 'Films', '/series': 'Series', '/genres': 'Genres', '/list': 'My list', '/search': 'Search' };
+  document.title = path === '/search' && params.get('q')
+    ? `${params.get('q')} — Injoy`
+    : `${titles[path] ?? 'Watch everything'} — Injoy`;
+
+  if (path === '/search') {
+    const term = params.get('q') ?? '';
+    if (document.activeElement !== searchInput) searchInput.value = term;
+  } else if (document.activeElement !== searchInput) {
+    searchInput.value = '';
+  }
+
+  if (path === '/films') return renderFilms(params, controller.signal);
+  if (path === '/series') return renderSeries(controller.signal);
+  if (path === '/genres') return renderGenres(controller.signal);
+  if (path === '/list') return renderList();
+  if (path === '/search') return renderSearch(params.get('q') ?? '', controller.signal);
+  return renderHome(controller.signal);
+}
+
+function openDetailRoute(id) {
+  if (lastDetailId === id) return;
+  lastDetailId = id;
+  ui.openDetail(id, detailHandlers);
+}
+
+function setActiveNav(path) {
+  const key = path === '/films' ? 'films'
+    : path === '/series' ? 'series'
+    : path === '/genres' ? 'genres'
+    : path === '/list' ? 'list'
+    : 'home';
+  document.querySelectorAll('.primary-nav a').forEach((link) => {
+    link.classList.toggle('is-active', link.dataset.nav === key);
+    if (link.dataset.nav === key) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+}
+
+/* --------------------------------- home ---------------------------------- */
+
+async function renderHome(signal) {
+  setActiveNav('/');
+  ui.homeSkeleton();
+  try {
+    const data = await getHome(signal);
+    if (signal?.aborted) return;
+
+    hero.hidden = false;
+    ui.renderHero(data.hero, handlers);
+
+    const fragment = document.createDocumentFragment();
+    if (continueCount()) {
+      fragment.append(ui.rail({
+        key: 'continue',
+        title: 'Continue watching',
+        sub: 'picked up where you left off',
+        items: recentItems().map((entry) => entry.item),
+      }, handlers));
+    }
+    for (const row of data.rows) fragment.append(ui.rail(row, handlers));
+
+    fragment.append(el('div', { class: 'state', style: { paddingTop: '20px' } },
+      el('p', { text: 'Every film here is hand-picked and streamed through public embed sources.' }),
+    ));
+
+    ui.clear(view).append(fragment);
+    if (footerMode) footerMode.textContent = 'curated catalog';
+  } catch (err) {
+    if (signal?.aborted) return;
+    hero.hidden = true;
+    ui.clear(view).append(ui.emptyState({
+      title: 'The projector jammed',
+      message: err.message,
+      actionLabel: 'Try again',
+      onAction: () => renderHome(),
+    }));
+  }
+}
+
+/* --------------------------------- films --------------------------------- */
+
+function pageHead(title, subtitle, tools = []) {
+  return el('div', { class: 'page-head' },
+    el('div', {},
+      el('h1', { text: title }),
+      subtitle ? el('p', { text: subtitle }) : null,
+    ),
+    el('div', { class: 'page-tools' }, ...tools),
+  );
+}
+
+async function renderFilms(params, signal) {
+  hero.hidden = true;
+  ui.clear(view);
+
+  const genre = params.get('genre') ?? '';
+  const sort = params.get('sort') ?? 'popular';
+
+  const genreSelect = el('select', { class: 'select', 'aria-label': 'Filter by genre' },
+    el('option', { value: '', text: 'All genres' }),
+  );
+  const sortSelect = el('select', { class: 'select', 'aria-label': 'Sort' },
+    el('option', { value: 'popular', text: 'Most popular' }),
+    el('option', { value: 'rating', text: 'Highest rated' }),
+    el('option', { value: 'newest', text: 'Newest first' }),
+    el('option', { value: 'oldest', text: 'Oldest first' }),
+  );
+  sortSelect.value = sort;
+
+  const head = pageHead('Every film', 'A hand-picked shelf — noir, horror, sci-fi, comedy, drama, western, animation, documentary.', [genreSelect, sortSelect]);
+  view.append(head);
+
+  const grid = el('div', { class: 'grid' });
+  const sentinel = el('div', { class: 'state', style: { padding: '24px' } });
+  view.append(grid, sentinel);
+
+  const navigate = (nextGenre, nextSort) => {
+    const next = new URLSearchParams();
+    if (nextGenre) next.set('genre', nextGenre);
+    if (nextSort && nextSort !== 'popular') next.set('sort', nextSort);
+    const suffix = next.toString();
+    history.pushState(null, '', `#/films${suffix ? `?${suffix}` : ''}`);
+    route();
+  };
+
+  genreSelect.addEventListener('change', () => navigate(genreSelect.value, sortSelect.value));
+  sortSelect.addEventListener('change', () => navigate(genreSelect.value, sortSelect.value));
+
+  getGenres()
+    .then((data) => {
+      genresCache = data.genres ?? [];
+      if (signal.aborted) return;
+      for (const item of genresCache) {
+        genreSelect.append(el('option', { value: item.id, text: item.name }));
+      }
+      genreSelect.value = genre;
+    })
+    .catch(() => {});
+
+  pagedGrid({
+    grid,
+    sentinel,
+    signal,
+    load: (page) => getBrowse({ page, genre, sort }, signal),
+  });
+}
+
+/* -------------------------------- series --------------------------------- */
+
+async function renderSeries(signal) {
+  hero.hidden = true;
+  ui.clear(view);
+  view.append(pageHead(
+    'Every series',
+    'Full seasons, episode by episode — dramas, comedies, sci-fi, crime and the odd documentary.',
+  ));
+
+  const grid = el('div', { class: 'grid' });
+  const note = el('div', { class: 'state', style: { padding: '24px' } },
+    el('div', { class: 'spinner' }),
+  );
+  view.append(grid, note);
+
+  try {
+    const data = await getSeries(signal);
+    if (signal?.aborted) return;
+    const items = data.items ?? [];
+    for (const item of items) grid.append(ui.gridCard(item, handlers));
+    note.replaceChildren(el('p', { text: `${items.length} series · ${items.reduce((sum, show) => sum + (show.episodes ?? 0), 0).toLocaleString()} episodes` }));
+  } catch (err) {
+    if (signal?.aborted) return;
+    note.replaceChildren(ui.emptyState({ title: 'No series', message: err.message }));
+  }
+}
+
+/* -------------------------------- genres --------------------------------- */
+
+async function renderGenres(signal) {
+  hero.hidden = true;
+  ui.clear(view);
+  view.append(pageHead('Genres', 'Pick a mood. The shelf rearranges itself.'));
+
+  const container = el('div', { class: 'genre-grid' });
+  view.append(container);
+
+  for (let i = 0; i < 12; i += 1) {
+    container.append(el('div', { class: 'skeleton', style: { height: '104px', borderRadius: '16px' } }));
+  }
+
+  try {
+    if (!genresCache) genresCache = (await getGenres()).genres ?? [];
+    if (signal?.aborted) return;
+    ui.clear(container);
+    for (const genre of genresCache) {
+      container.append(el('a', {
+        class: 'genre-tile',
+        href: `#/films?genre=${encodeURIComponent(genre.id)}`,
+        text: genre.name,
+      }));
+    }
+  } catch (err) {
+    ui.clear(container).append(ui.emptyState({ title: 'No genres', message: err.message }));
+  }
+}
+
+/* --------------------------------- search -------------------------------- */
+
+async function renderSearch(query, signal) {
+  hero.hidden = true;
+  const term = query.trim();
+  ui.clear(view);
+
+  if (!term) {
+    view.append(
+      pageHead('Search', 'Titles, directors, decades, vibes.'),
+      ui.emptyState({
+        title: 'What are you watching tonight?',
+        message: 'Try “Interstellar”, “noir”, “Nolan”, “1954”, or a title you half remember.',
+      }),
+    );
+    return;
+  }
+
+  view.append(pageHead(`“${term}”`, 'results'));
+
+  const grid = el('div', { class: 'grid' });
+  const sentinel = el('div', { class: 'state', style: { padding: '24px' } });
+  view.append(grid, sentinel);
+
+  pagedGrid({
+    grid,
+    sentinel,
+    signal,
+    load: (page) => getSearch(term, page, signal),
+    emptyTitle: `Nothing matched “${term}”`,
+    emptyMessage: 'Spelling, a shorter phrase, or a different decade usually finds it.',
+    emptyAction: { label: 'Back to home', action: () => { location.hash = '#/'; } },
+  });
+}
+
+/* ------------------------------- grid paging ----------------------------- */
+
+function pagedGrid({ grid, sentinel, load, signal, emptyTitle, emptyMessage, emptyAction }) {
+  let page = 0;
+  let loading = false;
+  let done = false;
+
+  const placeholders = [];
+  for (let i = 0; i < 12; i += 1) {
+    placeholders.push(el('div', { class: 'grid-skeleton skeleton' }));
+  }
+  grid.append(...placeholders);
+  const dropPlaceholders = () => {
+    while (placeholders.length) placeholders.pop().remove();
+  };
+
+  const more = async () => {
+    if (loading || done) return;
+    loading = true;
+    if (page > 0) sentinel.replaceChildren(el('div', { class: 'spinner' }));
+
+    try {
+      const data = await load(page + 1);
+      if (signal?.aborted) return;
+      page += 1;
+      dropPlaceholders();
+
+      for (const item of data.items ?? []) {
+        grid.append(ui.gridCard(item, handlers));
+      }
+
+      if (page === 1 && !(data.items ?? []).length) {
+        done = true;
+        sentinel.replaceChildren(ui.emptyState({
+          title: emptyTitle ?? 'Empty shelf',
+          message: emptyMessage,
+          actionLabel: emptyAction?.label,
+          onAction: emptyAction?.action,
+        }));
+        return;
+      }
+
+      if (page >= (data.totalPages ?? page) || page >= 20) {
+        done = true;
+        sentinel.replaceChildren();
+      } else if (page === 1) {
+        sentinel.replaceChildren(el('div', { class: 'state', style: { padding: '10px' } },
+          el('button', { class: 'btn btn-ghost btn-mini', type: 'button', on: { click: more } }, 'Load more')));
+      } else {
+        sentinel.replaceChildren();
+      }
+    } catch (err) {
+      if (signal?.aborted) return;
+      dropPlaceholders();
+      sentinel.replaceChildren(ui.emptyState({
+        title: 'Could not load more',
+        message: err.message,
+        actionLabel: 'Retry',
+        onAction: () => {
+          loading = false;
+          more();
+        },
+      }));
+    } finally {
+      loading = false;
+    }
+  };
+
+  const stop = ui.observeSentinel(sentinel, more);
+  more();
+  return stop;
+}
+
+/* ---------------------------------- list --------------------------------- */
+
+function renderList() {
+  hero.hidden = true;
+  ui.clear(view);
+
+  const items = listItems();
+  const continueRow = recentItems();
+
+  view.append(pageHead('My list', `${items.length} saved · ${continueRow.length} in progress`));
+
+  if (items.length === 0) {
+    view.append(ui.emptyState({
+      title: 'Your list is empty',
+      message: 'Hit the + on any card and it lands here, on every device that talks to this server.',
+      actionLabel: 'Find something',
+      onAction: () => { location.hash = '#/films'; },
+    }));
+    return;
+  }
+
+  if (continueRow.length) {
+    view.append(ui.rail({
+      key: 'continue-list',
+      title: 'Continue watching',
+      items: continueRow.map((entry) => entry.item),
+    }, handlers));
+  }
+
+  view.append(ui.buildGrid(items, handlers));
+}
+
+/* --------------------------------- boot ---------------------------------- */
+
+function onSearchSubmit(event) {
+  event.preventDefault();
+  const value = searchInput.value.trim();
+  if (!value) {
+    location.hash = '#/';
+    return;
+  }
+  const next = `#/search?q=${encodeURIComponent(value)}`;
+  if (location.hash === next) route();
+  else location.hash = next;
+  searchInput.blur();
+}
+
+function onSearchInput() {
+  clearTimeout(searchTimer);
+  const value = searchInput.value.trim();
+  searchTimer = setTimeout(() => {
+    if (value.length === 0) {
+      if (location.hash.startsWith('#/search')) {
+        history.replaceState(null, '', '#/');
+        route();
+      }
+      return;
+    }
+    if (value.length < 2) return;
+    history.replaceState(null, '', `#/search?q=${encodeURIComponent(value)}`);
+    route();
+  }, 420);
+}
+
+async function surpriseMe() {
+  randomButton.classList.add('is-busy');
+  try {
+    const { item } = await getRandom();
+    if (item) location.hash = `#/movie/${encodeURIComponent(item.id)}`;
+  } catch (err) {
+    ui.toast(err.message, 'err');
+  } finally {
+    randomButton.classList.remove('is-busy');
+  }
+}
+
+function globalKeys(event) {
+  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+
+  if (event.key === '/' && !typing) {
+    event.preventDefault();
+    searchInput.focus();
+    searchInput.select();
+    return;
+  }
+  if (event.key.toLowerCase() === 'r' && !typing && !event.metaKey && !event.ctrlKey) {
+    event.preventDefault();
+    surpriseMe();
+    return;
+  }
+  if (event.key === 'Escape' && document.activeElement === searchInput) {
+    searchInput.value = '';
+    searchInput.blur();
+    if (location.hash.startsWith('#/search')) {
+      history.replaceState(null, '', '#/');
+      route();
+    }
+  }
+}
+
+async function boot() {
+  if (booted) return;
+  booted = true;
+
+  loadLocal();
+  subscribe((reason) => {
+    if (reason === 'list' || reason === 'sync') {
+      if (location.hash.startsWith('#/list')) renderList();
+    }
+  });
+
+  document.getElementById('search-form').addEventListener('submit', onSearchSubmit);
+  searchInput.addEventListener('input', onSearchInput);
+  randomButton.addEventListener('click', surpriseMe);
+  document.addEventListener('keydown', globalKeys);
+
+  window.addEventListener('hashchange', route);
+  window.addEventListener('scroll', () => {
+    topbar.classList.toggle('is-stuck', window.scrollY > 14);
+  }, { passive: true });
+  topbar.classList.toggle('is-stuck', window.scrollY > 14);
+
+  route();
+
+  syncLibrary().catch(() => {});
+
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+}
+
+boot();
