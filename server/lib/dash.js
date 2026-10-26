@@ -44,8 +44,8 @@ function resolveUrl(value, base) {
   }
 }
 
-function pickTrack(candidates, { preferAvc = false } = {}) {
-  if (!candidates.length) return null;
+function rankTracks(candidates, { preferAvc = false } = {}) {
+  if (!candidates.length) return [];
   const score = (rep) => {
     const avc = /^avc1/i.test(rep.codecs ?? '');
     const hevc = /^(hev1|hvc1)/i.test(rep.codecs ?? '');
@@ -54,7 +54,11 @@ function pickTrack(candidates, { preferAvc = false } = {}) {
     if (!avc && !hevc) value -= 5_000_000;
     return value;
   };
-  return [...candidates].sort((a, b) => score(b) - score(a))[0];
+  return [...candidates].sort((a, b) => score(b) - score(a));
+}
+
+function pickTrack(candidates, options) {
+  return rankTracks(candidates, options)[0] ?? null;
 }
 
 /**
@@ -124,9 +128,12 @@ export function parseMpd(xml, mpdUrl) {
 
   if (!video.length || !audio.length) return null;
 
+  const videos = rankTracks(video, { preferAvc: true });
+
   return {
     duration,
-    video: pickTrack(video, { preferAvc: true }),
+    video: videos[0],
+    videos,
     audio: pickTrack(audio),
   };
 }
@@ -167,7 +174,7 @@ export async function loadDashManifest(mpdUrl, referer = null) {
   const parsed = parseMpd(xml, mpdUrl);
   if (!parsed) return { ok: false, error: 'manifest has no playable video/audio pair' };
 
-  return { ok: true, duration: parsed.duration, video: parsed.video, audio: parsed.audio };
+  return { ok: true, duration: parsed.duration, video: parsed.video, videos: parsed.videos, audio: parsed.audio };
 }
 
 /**
@@ -201,6 +208,7 @@ export async function resolveDashTracks({ tmdbId, imdbId = null, season = null, 
     page: resolved.page ?? null,
     duration: manifest.duration,
     video: manifest.video,
+    videos: manifest.videos,
     audio: manifest.audio,
   };
 }
@@ -210,9 +218,14 @@ export async function resolveDashTracks({ tmdbId, imdbId = null, season = null, 
  * shape its MSE feeder expects. The download job reuses the same tracks, so one
  * resolver run both plays and caches a title.
  */
-export function createDashSession(id, found) {
-  prune();
-
+/**
+ * Register one rendition as a live session and return its client payload.
+ *
+ * Every rendition is registered up front — a quality switch then costs no
+ * network at all, which matters because the feeder keeps the browser's
+ * six-connection pool busy for the whole film.
+ */
+function registerDashSession(id, found, videos, video, index) {
   const sid = randomUUID();
   const session = {
     sid,
@@ -220,11 +233,14 @@ export function createDashSession(id, found) {
     createdAt: Date.now(),
     referer: found.referer,
     duration: found.duration,
-    segmentDuration: found.video.segmentDuration,
-    startNumber: found.video.startNumber,
-    segments: found.video.segments,
-    video: found.video,
+    segmentDuration: video.segmentDuration,
+    startNumber: video.startNumber,
+    segments: video.segments,
+    video,
+    videos,
     audio: found.audio,
+    page: found.page ?? null,
+    variantIndex: index,
   };
   sessions.set(sid, session);
 
@@ -235,12 +251,20 @@ export function createDashSession(id, found) {
     segmentDuration: session.segmentDuration,
     startNumber: session.startNumber,
     segments: session.segments,
+    quality: video.height ? `${video.height}p` : 'auto',
+    variants: videos.map((rep, at) => ({
+      index: at,
+      height: rep.height,
+      bandwidth: rep.bandwidth,
+      label: rep.height ? `${rep.height}p` : `${(rep.bandwidth / 1_000_000).toFixed(1)} Mbps`,
+    })),
+    variant: index,
     video: {
-      codecs: found.video.codecs,
-      mime: `video/mp4; codecs="${found.video.codecs}"`,
-      width: found.video.width,
-      height: found.video.height,
-      bandwidth: found.video.bandwidth,
+      codecs: video.codecs,
+      mime: `video/mp4; codecs="${video.codecs}"`,
+      width: video.width,
+      height: video.height,
+      bandwidth: video.bandwidth,
     },
     audio: {
       codecs: found.audio.codecs,
@@ -249,6 +273,56 @@ export function createDashSession(id, found) {
     },
     page: found.page ?? null,
   };
+}
+
+export function createDashSession(id, found, variantIndex = null) {
+  prune();
+
+  const videos = found.videos?.length ? found.videos : [found.video];
+  const index = Number.isInteger(variantIndex)
+    ? Math.max(0, Math.min(variantIndex, videos.length - 1))
+    : Math.max(0, videos.indexOf(found.video));
+
+  const built = videos.map((video, at) => registerDashSession(id, found, videos, video, at));
+  const payload = built[index];
+
+  // `renditions` is the whole ladder, each entry a ready session. The client
+  // swaps `session` and remounts at the playhead — no request, no waiting.
+  // Copies, not references: a session that carried the ladder inside itself
+  // would be circular and could not be serialised.
+  payload.renditions = built.map((entry) => ({
+    index: entry.variant,
+    label: entry.quality,
+    bandwidth: entry.video.bandwidth,
+    session: { ...entry },
+  }));
+
+  return payload;
+}
+
+/**
+ * Re-open a live DASH session on a different video rendition.
+ *
+ * Audio is untouched: only the video track carries the ladder. The client
+ * remounts its feeder at the current playhead, so the switch is a clean cut.
+ */
+export function switchDashVariant(sid, index) {
+  const session = sessions.get(String(sid));
+  if (!session) return { ok: false, error: 'session expired' };
+  const videos = session.videos ?? [];
+  if (videos.length < 2) return { ok: false, error: 'this stream has one rendition' };
+  if (!Number.isInteger(index) || index < 0 || index >= videos.length) {
+    return { ok: false, error: 'unknown quality' };
+  }
+
+  return createDashSession(session.id, {
+    referer: session.referer,
+    duration: session.duration,
+    video: videos[index],
+    videos,
+    audio: session.audio,
+    page: session.page,
+  }, index);
 }
 
 /**

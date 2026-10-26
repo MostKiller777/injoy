@@ -19,6 +19,8 @@
 const LOOKAHEAD = 40;      // seconds of media kept ahead of the playhead
 const AHEAD = 3;           // segment fetches kept in flight
 const MAX_RETRIES = 3;
+const SETTLE_MS = 500;     // grace period after a mount, before seeks count
+const REMOUNT_DELAY = 200; // let a scrub settle before rebuilding the demuxer
 
 export function createHlsFeeder(video, session, { startAt = 0, onError = null } = {}) {
   const durations = Array.isArray(session.durations) ? session.durations : [];
@@ -43,19 +45,6 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
   }
   const duration = starts[mediaTotal] || session.duration || 0;
 
-  const mediaSource = new MediaSource();
-  const objectUrl = URL.createObjectURL(mediaSource);
-  video.src = objectUrl;
-
-  let sourceBuffer = null;
-  let next = 0;              // next segment index to fetch
-  let restartAt = null;      // seek target waiting for the in-flight append
-  let busy = false;
-  let stopped = false;
-  let retries = 0;
-  let landed = false;
-  let pendingSeek = Number.isFinite(startAt) && startAt > 0 ? startAt : 0;
-
   const indexForTime = (time) => {
     if (time <= 0) return 0;
     let lo = 0;
@@ -72,10 +61,6 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     const { buffered } = video;
     return buffered && buffered.length ? buffered.end(buffered.length - 1) : 0;
   };
-
-  // Playback state for diagnostics — the queue, not the media. Small enough to
-  // leave in: a stalled stream is otherwise invisible from the outside.
-  video.__hlsState = () => ({ next, busy, restartAt, stopped, retries, landed, mediaTotal, hasMap });
 
   const covered = (time) => {
     const { buffered } = video;
@@ -104,42 +89,22 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     return best;
   };
 
-  const fail = (err) => {
-    if (stopped) return;
-    stopped = true;
-    try { mediaSource.endOfStream('network'); } catch { /* already closed */ }
-    onError?.(err instanceof Error ? err : new Error(String(err)));
+  /**
+   * Put the playhead on real media.
+   *
+   * The element will not play a position that sits even a fraction of a second
+   * before the first frame a range holds — it stays in `seeking` with
+   * readyState 1 indefinitely. `covered` tolerates that gap when scheduling, so
+   * every landing goes through here and gets clamped onto the range start.
+   *
+   * Forward only: it never drags the playhead back to a range behind it.
+   */
+  const seekTo = (time) => {
+    const near = nearestRange(time);
+    const target = near && time < near.start + 0.05 ? near.start + 0.05 : time;
+    if (Math.abs(target - video.currentTime) < 0.01) return;
+    try { video.currentTime = target; } catch { /* not seekable yet */ }
   };
-
-  const append = (bytes) => new Promise((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      sourceBuffer.removeEventListener('updateend', onEnd);
-      sourceBuffer.removeEventListener('error', onErr);
-    };
-    // A SourceBuffer that is aborted mid-append can swallow updateend, which
-    // would leave the queue waiting forever on a promise nobody settles.
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error('source buffer stalled'));
-    }, 20_000);
-    const onEnd = () => {
-      cleanup();
-      resolve();
-    };
-    const onErr = () => {
-      cleanup();
-      reject(new Error('source buffer rejected a segment'));
-    };
-    sourceBuffer.addEventListener('updateend', onEnd);
-    sourceBuffer.addEventListener('error', onErr);
-    try {
-      sourceBuffer.appendBuffer(bytes);
-    } catch (err) {
-      cleanup();
-      reject(err);
-    }
-  });
 
   const fetchSegment = async (index) => {
     const res = await fetch(`${session.base}/${index}`, { cache: 'no-store' });
@@ -147,157 +112,257 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     return new Uint8Array(await res.arrayBuffer());
   };
 
-  // Segments are a few megabytes each and one connection delivers them slower
-  // than real time, so a strictly serial fetch→append loop starves. Keep a
-  // short pipeline in flight and append it in order.
-  const inflight = new Map();
-  const startFetch = (index) => {
-    if (inflight.has(index) || index >= total) return;
-    const promise = fetchSegment(index);
-    // Handled here so a dropped fetch (a seek moved the queue past it) cannot
-    // surface as an unhandled rejection; the pump still awaits the original.
-    promise.catch(() => { inflight.delete(index); });
-    inflight.set(index, promise);
-  };
-  const fetchAhead = () => {
-    const until = Math.min(next + AHEAD, total);
-    for (let index = next; index < until; index += 1) startFetch(index);
-  };
+  let detachCurrent = null;
+  let mountSeq = 0;
+  let mountedAt = 0;
+  let remountTimer = null;
+  let closed = false;
 
-  const pump = async () => {
-    if (stopped || busy || !sourceBuffer) return;
+  /**
+   * One mount is one MediaSource, and one MediaSource is one demuxer.
+   *
+   * Chrome's MPEG-TS demuxer keeps a single continuous DTS expectation for the
+   * life of a SourceBuffer. Feed it a segment four thousand seconds past what
+   * it has already parsed and it rejects the append with
+   * `CHUNK_DEMUXER_ERROR_APPEND_FAILED: Parsed buffers not in DTS sequence` —
+   * which latches `HTMLMediaElement.error` and kills every later append.
+   * `timestampOffset` would fix that, but Chrome refuses to set it while the
+   * buffer is mid-parse. So a long seek throws the whole mount away and starts
+   * a fresh one at the new position: new demuxer, clean timeline, one segment
+   * refetched.
+   */
+  const mount = (from) => {
+    const mediaSource = new MediaSource();
+    const objectUrl = URL.createObjectURL(mediaSource);
+    video.src = objectUrl;
 
-    // Hold the window: enough buffered ahead means wait for the playhead.
-    if (video.currentTime > 0 && bufferedEnd() - video.currentTime >= LOOKAHEAD) return;
-    if (next >= total) {
-      if (mediaSource.readyState === 'open') {
-        try { mediaSource.endOfStream(); } catch { /* already ended */ }
-      }
-      return;
-    }
+    const seq = (mountSeq += 1);
+    mountedAt = Date.now();
 
-    busy = true;
-    try {
-      // A seek asked for a new start point while the previous append was in
-      // flight; honour it now that the buffer is idle.
-      if (restartAt !== null) {
-        next = restartAt;
-        restartAt = null;
-        // Drop fetches for positions the seek jumped over.
-        for (const key of [...inflight.keys()]) if (key < next) inflight.delete(key);
-      }
-      startFetch(next);
-      fetchAhead();
-      const bytes = await inflight.get(next);
-      inflight.delete(next);
-      await append(bytes);
-      retries = 0;
-      next += 1;
+    let sourceBuffer = null;
+    let next = 0;              // next segment index to fetch
+    let busy = false;
+    let stopped = false;
+    let retries = 0;
+    let landed = false;
+    let pendingSeek = Number.isFinite(from) && from > 0 ? from : 0;
 
-      // A transport stream does not start at PTS 0, so a buffered range can
-      // begin a second or so after the timestamp the playlist promised. The
-      // element sits just before the data and refuses to play, so snap it to
-      // the first frame the buffer actually holds — using the range nearest the
-      // playhead, not the oldest one, which is what a forward seek leaves behind.
-      const near = nearestRange(video.currentTime);
-      if (near && near.start - video.currentTime > 0.05 && near.start - video.currentTime < 5) {
-        try { video.currentTime = near.start + 0.05; } catch { /* not seekable yet */ }
-      }
+    // Playback state for diagnostics — the queue, not the media. Small enough
+    // to leave in: a stalled stream is otherwise invisible from the outside.
+    video.__hlsState = () => ({
+      next,
+      busy,
+      stopped,
+      retries,
+      landed,
+      mediaTotal,
+      hasMap,
+      mount: seq,
+    });
 
-      if (!landed && pendingSeek > 0 && covered(pendingSeek)) {
-        video.currentTime = pendingSeek;
-        landed = true;
-      }
-      if (!landed && pendingSeek === 0) landed = true;
-    } catch (err) {
+    const fail = (err) => {
       if (stopped) return;
-      inflight.delete(next);
-      retries += 1;
-      if (retries > MAX_RETRIES) {
-        fail(err);
-        return;
-      }
-    } finally {
-      busy = false;
-    }
+      stopped = true;
+      try { mediaSource.endOfStream('network'); } catch { /* already closed */ }
+      onError?.(err instanceof Error ? err : new Error(String(err)));
+    };
 
-    // Continue on the next tick so the element gets a chance to drain.
-    if (!stopped) setTimeout(pump, 0);
-  };
-
-  mediaSource.addEventListener('sourceopen', async () => {
-    for (const type of candidates) {
-      if (!MediaSource.isTypeSupported(type)) continue;
+    const append = (bytes) => new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        sourceBuffer.removeEventListener('updateend', onEnd);
+        sourceBuffer.removeEventListener('error', onErr);
+      };
+      // A SourceBuffer that is aborted mid-append can swallow updateend, which
+      // would leave the queue waiting forever on a promise nobody settles.
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('source buffer stalled'));
+      }, 20_000);
+      const onEnd = () => {
+        cleanup();
+        resolve();
+      };
+      const onErr = () => {
+        cleanup();
+        reject(new Error('source buffer rejected a segment'));
+      };
+      sourceBuffer.addEventListener('updateend', onEnd);
+      sourceBuffer.addEventListener('error', onErr);
       try {
-        sourceBuffer = mediaSource.addSourceBuffer(type);
-        break;
-      } catch {
-        // The browser claimed support and then refused the buffer; try the next.
-      }
-    }
-    if (!sourceBuffer) {
-      fail(new Error('no supported source buffer for this stream'));
-      return;
-    }
-    if (duration) {
-      try { mediaSource.duration = duration; } catch { /* live playlists refuse */ }
-    }
-
-    // The init segment describes the whole track, so it goes in first no matter
-    // where playback starts. Only then can a media segment be appended.
-    if (hasMap) {
-      try {
-        await append(await fetchSegment(0));
+        sourceBuffer.appendBuffer(bytes);
       } catch (err) {
-        fail(err);
+        cleanup();
+        reject(err);
+      }
+    });
+
+    // Segments are a few megabytes each and one connection delivers them slower
+    // than real time, so a strictly serial fetch→append loop starves. Keep a
+    // short pipeline in flight and append it in order.
+    const inflight = new Map();
+    const startFetch = (index) => {
+      if (inflight.has(index) || index >= total) return;
+      const promise = fetchSegment(index);
+      // Handled here so a dropped fetch (a seek moved the queue past it) cannot
+      // surface as an unhandled rejection; the pump still awaits the original.
+      promise.catch(() => { inflight.delete(index); });
+      inflight.set(index, promise);
+    };
+    const fetchAhead = () => {
+      const until = Math.min(next + AHEAD, total);
+      for (let index = next; index < until; index += 1) startFetch(index);
+    };
+
+    const pump = async () => {
+      if (stopped || busy || !sourceBuffer) return;
+
+      // Hold the window: enough buffered ahead means wait for the playhead.
+      if (video.currentTime > 0 && bufferedEnd() - video.currentTime >= LOOKAHEAD) return;
+      if (next >= total) {
+        if (mediaSource.readyState === 'open') {
+          try { mediaSource.endOfStream(); } catch { /* already ended */ }
+        }
         return;
       }
-    }
 
-    if (pendingSeek > 0) {
-      // Start the fetch at the resume point instead of walking from zero.
-      next = hasMap ? indexForTime(pendingSeek) + 1 : indexForTime(pendingSeek);
-    } else {
-      next = hasMap ? 1 : 0;
-    }
-    pump();
-  });
+      busy = true;
+      try {
+        startFetch(next);
+        fetchAhead();
+        const bytes = await inflight.get(next);
+        inflight.delete(next);
+        await append(bytes);
+        retries = 0;
+        next += 1;
 
-  mediaSource.addEventListener('error', () => fail(new Error('media source closed')));
+        // A transport stream does not start at PTS 0, so a buffered range can
+        // begin seconds after the timestamp the playlist promised — 32 s in on
+        // some provider encodes. The element sits before the data and refuses
+        // to play, so snap it forward to the first frame the buffer holds.
+        seekTo(video.currentTime);
 
-  // A seek outside the buffered window restarts the queue at the new position.
-  const onSeeking = () => {
-    if (stopped || !sourceBuffer || !video.seeking) return;
-    const time = video.currentTime;
-    if (covered(time)) return;
-    const index = indexForTime(time);
-    const target = hasMap ? index + 1 : index;
-    if (target >= next && target < next + 2) return; // already heading there
-    // Never abort a pending append: an interrupted append can leave the queue
-    // waiting on an updateend that never arrives. The next pump jumps forward.
-    restartAt = target;
-    if (!busy) {
-      next = restartAt;
-      restartAt = null;
-      setTimeout(pump, 0);
-    }
+        if (!landed && pendingSeek > 0 && covered(pendingSeek)) {
+          seekTo(pendingSeek);
+          landed = true;
+        }
+        // A resume point can fall in the gap before the first frame a segment
+        // actually holds; sitting on real media at all counts as landing.
+        if (!landed && covered(video.currentTime)) landed = true;
+        if (!landed && pendingSeek === 0) landed = true;
+      } catch (err) {
+        if (stopped) return;
+        inflight.delete(next);
+        retries += 1;
+        if (retries > MAX_RETRIES) {
+          fail(err);
+          return;
+        }
+      } finally {
+        busy = false;
+      }
+
+      // Continue on the next tick so the element gets a chance to drain.
+      if (!stopped) setTimeout(pump, 0);
+    };
+
+    mediaSource.addEventListener('sourceopen', async () => {
+      for (const type of candidates) {
+        if (!MediaSource.isTypeSupported(type)) continue;
+        try {
+          sourceBuffer = mediaSource.addSourceBuffer(type);
+          break;
+        } catch {
+          // The browser claimed support and then refused the buffer; try the next.
+        }
+      }
+      if (!sourceBuffer) {
+        fail(new Error('no supported source buffer for this stream'));
+        return;
+      }
+
+      if (duration) {
+        try { mediaSource.duration = duration; } catch { /* live playlists refuse */ }
+      }
+
+      // The init segment describes the whole track, so it goes in first no matter
+      // where playback starts. Only then can a media segment be appended.
+      if (hasMap) {
+        try {
+          await append(await fetchSegment(0));
+        } catch (err) {
+          fail(err);
+          return;
+        }
+      }
+
+      if (pendingSeek > 0) {
+        // Start the fetch at the resume point instead of walking from zero.
+        next = hasMap ? indexForTime(pendingSeek) + 1 : indexForTime(pendingSeek);
+      } else {
+        next = hasMap ? 1 : 0;
+      }
+      pump();
+    });
+
+    mediaSource.addEventListener('error', () => fail(new Error('media source closed')));
+
+    // A seek outside the buffered window cannot be appended into this demuxer,
+    // so it gets a fresh mount at the new position. A scrub fires one seek per
+    // pixel of travel, so the rebuild waits for the drag to settle.
+    const onSeeking = () => {
+      if (stopped || closed || !sourceBuffer || !video.seeking) return;
+      // A new mount resets the element to zero and fires a seek of its own.
+      if (Date.now() - mountedAt < SETTLE_MS) return;
+      // A hair before the first frame of a range: the element will never play
+      // from there, but the data is right in front of it. Snap on, don't rebuild.
+      const near = nearestRange(video.currentTime);
+      if (near && video.currentTime < near.start) {
+        seekTo(video.currentTime);
+        return;
+      }
+      if (covered(video.currentTime)) return;
+      clearTimeout(remountTimer);
+      remountTimer = setTimeout(() => { remount(video.currentTime); }, REMOUNT_DELAY);
+    };
+    video.addEventListener('seeking', onSeeking);
+
+    const onTimeUpdate = () => {
+      if (stopped || busy) return;
+      if (bufferedEnd() - video.currentTime < LOOKAHEAD / 2) pump();
+    };
+    video.addEventListener('timeupdate', onTimeUpdate);
+
+    return () => {
+      stopped = true;
+      video.removeEventListener('seeking', onSeeking);
+      video.removeEventListener('timeupdate', onTimeUpdate);
+      try { sourceBuffer?.abort(); } catch { /* already gone */ }
+      try {
+        if (mediaSource.readyState === 'open') mediaSource.endOfStream();
+      } catch { /* already ended */ }
+      URL.revokeObjectURL(objectUrl);
+    };
   };
-  video.addEventListener('seeking', onSeeking);
 
-  const onTimeUpdate = () => {
-    if (stopped || busy) return;
-    if (bufferedEnd() - video.currentTime < LOOKAHEAD / 2) pump();
+  const remount = (time) => {
+    if (closed) return;
+    clearTimeout(remountTimer);
+    remountTimer = null;
+    const wasPlaying = !video.paused;
+    try { detachCurrent?.(); } catch { /* already detached */ }
+    detachCurrent = mount(time);
+    // A remount is a src change, so the element needs telling to resume.
+    if (wasPlaying) video.play().catch(() => { /* autoplay refused */ });
   };
-  video.addEventListener('timeupdate', onTimeUpdate);
+
+  detachCurrent = mount(startAt);
 
   return () => {
-    stopped = true;
-    video.removeEventListener('seeking', onSeeking);
-    video.removeEventListener('timeupdate', onTimeUpdate);
-    try { sourceBuffer?.abort(); } catch { /* already gone */ }
-    try {
-      if (mediaSource.readyState === 'open') mediaSource.endOfStream();
-    } catch { /* already ended */ }
-    URL.revokeObjectURL(objectUrl);
+    closed = true;
+    clearTimeout(remountTimer);
+    remountTimer = null;
+    try { detachCurrent?.(); } catch { /* already detached */ }
+    detachCurrent = null;
   };
 }

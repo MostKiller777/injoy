@@ -78,6 +78,12 @@ export const getPlay = (id, signal) => api(`/api/play/${encodeURIComponent(id)}`
 });
 export const getRandom = () => api('/api/random');
 
+// Re-open a live stream on another rendition; the reply is a fresh session.
+export const getHlsVariant = (sid, index) =>
+  api(`/api/hls/variant/${encodeURIComponent(sid)}/${index}`, { timeout: 30_000 });
+export const getDashVariant = (sid, index) =>
+  api(`/api/dash/variant/${encodeURIComponent(sid)}/${index}`, { timeout: 30_000 });
+
 export const getWatchlist = () => api('/api/watchlist', { cache: 'no-store' });
 export const putWatchlist = (item) => api('/api/watchlist', { method: 'POST', body: { item } });
 export const deleteWatchlist = (id) => api(`/api/watchlist/${encodeURIComponent(id)}`, { method: 'DELETE' });

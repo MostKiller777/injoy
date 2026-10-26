@@ -75,6 +75,7 @@ export function hlsSessionFrom(manifest) {
     mime: manifest.mime ?? mimes[0],
     mimes,
     hasMap: fmp4,
+    startPts: manifest.startPts ?? 0,
     local: true,
   };
 }

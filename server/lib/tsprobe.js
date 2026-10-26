@@ -92,6 +92,24 @@ function scanPts(buffer, { first = false } = {}) {
 }
 
 /**
+ * First PTS in a transport-stream buffer, in seconds.
+ *
+ * A provider's playlist timeline starts at zero but the media inside it is
+ * stamped from wherever the encoder felt like — 32 s in, on some encodes. MSE
+ * puts segments on the timeline at their PTS, so without this the scrubber and
+ * every seek would sit that far off. The client rebases the SourceBuffer with
+ * `timestampOffset` using this number.
+ */
+export function probeTsStartPts(buffer) {
+  const head = scanPts(buffer, { first: true });
+  if (!head || head.min === null) return null;
+  const seconds = head.min / 90_000;
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds > 60 * 60 * 12) return null;
+  // Rounded to the millisecond; MSE takes a float.
+  return Math.round(seconds * 1000) / 1000;
+}
+
+/**
  * Duration in seconds, or null when the file is not a parseable transport
  * stream. Values are clamped to a sane range so a corrupt tail cannot report a
  * 40-hour film.

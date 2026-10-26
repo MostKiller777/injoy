@@ -1,6 +1,7 @@
 import { createDecipheriv, randomUUID } from 'node:crypto';
 
 import { FMP4_MIMES, probeTsCodecs, tsMimes } from './tscodec.js';
+import { probeTsStartPts } from './tsprobe.js';
 import { notePlaying } from './playback.js';
 
 /**
@@ -59,8 +60,15 @@ async function fetchText(url, headers) {
   return text;
 }
 
-/** Master playlist → highest-bandwidth variant. Media playlist → itself. */
-async function mediaPlaylist(url, headers, depth = 0) {
+/**
+ * Master playlist → the rendition list, plus one media playlist resolved down.
+ *
+ * The list is kept, not thrown away: the player offers it as a quality menu, so
+ * index 0 is the best rendition and every index stays stable for the life of
+ * the session. A variant that is itself a master playlist is resolved down to
+ * its own media playlist.
+ */
+async function readPlaylist(url, headers, depth = 0) {
   if (depth > 4) throw new Error('playlist nesting too deep');
   const text = await fetchText(url, headers);
 
@@ -78,16 +86,28 @@ async function mediaPlaylist(url, headers, depth = 0) {
     });
   }
 
-  if (variants.length) {
-    variants.sort((a, b) => b.bandwidth - a.bandwidth);
-    const chosen = await mediaPlaylist(variants[0].url, headers, depth + 1);
-    // Keep the master playlist's declaration: the media playlist carries no
-    // resolution of its own, and the player shows this as the quality label.
-    return { ...chosen, variant: chosen.variant ?? variants[0] };
-  }
+  if (!variants.length) return { media: { url, text }, variants: [] };
 
-  return { url, text, variant: null };
+  variants.sort((a, b) => b.bandwidth - a.bandwidth);
+  const nested = await readPlaylist(variants[0].url, headers, depth + 1);
+  return { media: nested.media, variants };
 }
+
+const variantHeight = (variant) => Number(String(variant?.resolution ?? '').split('x')[1]) || 0;
+
+function variantLabel(variant) {
+  const height = variantHeight(variant);
+  if (height) return `${height}p`;
+  const mbps = Number(variant?.bandwidth ?? 0) / 1_000_000;
+  return mbps > 0 ? `${mbps.toFixed(1)} Mbps` : 'auto';
+}
+
+const variantList = (variants) => variants.map((variant, index) => ({
+  index,
+  height: variantHeight(variant),
+  bandwidth: variant.bandwidth,
+  label: variantLabel(variant),
+}));
 
 /** Media playlist → segments with their durations, init map and key. */
 function parseMedia(url, text) {
@@ -220,20 +240,12 @@ async function fetchHead(url, headers, limit = 384 * 1024) {
 }
 
 /**
- * Resolve a manifest URL into a live session the player can drive. Returns
- * `{ ok: true, ...clientPayload }` or `{ ok: false, error }`.
+ * Turn one media playlist into a live session and its client payload.
+ *
+ * Shared by the first open and by a quality switch, so a rendition change
+ * produces exactly the same shape the player already knows how to mount.
  */
-export async function openHlsSession({ id, url, referer = null }) {
-  prune();
-
-  const headers = referer ? { referer, origin: referer } : {};
-  let media;
-  try {
-    media = await mediaPlaylist(url, headers);
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-
+async function buildSession({ id, media, referer, variants, variantIndex }) {
   let parsed;
   try {
     parsed = parseMedia(media.url, media.text);
@@ -246,7 +258,7 @@ export async function openHlsSession({ id, url, referer = null }) {
     // Probe the key now: a dead key would fail on the first segment otherwise,
     // and the caller can still fall back to an embed instead of a black frame.
     try {
-      await aesKey(parsed.segments.find((s) => s.key).key.url, headers);
+      await aesKey(parsed.segments.find((s) => s.key).key.url, referer ? { referer, origin: referer } : {});
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -262,17 +274,22 @@ export async function openHlsSession({ id, url, referer = null }) {
     durations: parsed.durations,
     map: parsed.map,
     duration: parsed.total,
+    variants,
+    variantIndex,
   });
 
   // fMP4 playlists carry an init segment and want video/mp4; transport streams
   // are muxed and go straight into a video/mp2t SourceBuffer.
   const fmp4 = Boolean(parsed.map);
-  const height = Number(String(media.variant?.resolution ?? '').split('x')[1]) || 0;
+  const variant = variants[variantIndex] ?? null;
+  const height = variantHeight(variant);
 
   // MSE refuses a bare container type, so the TS codecs are read from the PMT
   // in the first segment. A failure here is not fatal: the client walks the
-  // candidate list until one SourceBuffer is accepted.
+  // candidate list until one SourceBuffer is accepted. The same head carries
+  // the first PTS, which is where the media actually starts on the timeline.
   let mimes = FMP4_MIMES;
+  let startPts = 0;
   if (!fmp4) {
     const first = parsed.segments[0];
     let codecs = null;
@@ -286,6 +303,7 @@ export async function openHlsSession({ id, url, referer = null }) {
       let head = await fetchHead(first.url, probeHeaders);
       if (first.key) head = decrypt(head, await aesKey(first.key.url, probeHeaders), first.key.iv, first.key.sequence);
       codecs = probeTsCodecs(head);
+      startPts = probeTsStartPts(head) ?? 0;
     } catch {
       codecs = null;
     }
@@ -296,7 +314,9 @@ export async function openHlsSession({ id, url, referer = null }) {
     ok: true,
     sid,
     container: fmp4 ? 'hls-fmp4' : 'hls',
-    quality: height ? `${height}p` : 'auto',
+    quality: height ? `${height}p` : variantLabel(variant),
+    variants: variantList(variants),
+    variant: variantIndex,
     duration: Math.round(parsed.total * 1000) / 1000,
     segments: parsed.segments.length,
     durations: parsed.durations,
@@ -306,8 +326,97 @@ export async function openHlsSession({ id, url, referer = null }) {
     mime: mimes[0],
     mimes,
     hasMap: fmp4,
+    startPts,
     base: `/api/hls/seg/${sid}`,
   };
+}
+
+/**
+ * Resolve a manifest URL into a live session the player can drive. Returns
+ * `{ ok: true, ...clientPayload }` or `{ ok: false, error }`.
+ */
+export async function openHlsSession({ id, url, referer = null, variantIndex = 0 }) {
+  prune();
+
+  const headers = referer ? { referer, origin: referer } : {};
+  let playlist;
+  try {
+    playlist = await readPlaylist(url, headers);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+
+  const { variants } = playlist;
+
+  // A media playlist on its own: one rendition, nothing to switch between.
+  if (!variants.length) {
+    return buildSession({ id, media: playlist.media, referer, variants: [], variantIndex: 0 });
+  }
+
+  // Open every rendition now. The feeder keeps the browser's six-connection
+  // pool busy for the whole film, so a quality switch that needed a round trip
+  // would queue behind the segment downloads for seconds — or minutes on a slow
+  // provider. Pre-opening makes the switch local and instant.
+  const usable = [];
+  const medias = [];
+  for (let at = 0; at < variants.length; at += 1) {
+    try {
+      const media = at === 0 ? playlist.media : (await readPlaylist(variants[at].url, headers)).media;
+      medias.push(media);
+      usable.push(variants[at]);
+    } catch {
+      // A dead rendition is dropped from the ladder; the rest still play.
+    }
+  }
+  if (!medias.length) return { ok: false, error: 'playlist has no segments' };
+
+  const built = [];
+  for (let at = 0; at < medias.length; at += 1) {
+    const session = await buildSession({ id, media: medias[at], referer, variants: usable, variantIndex: at });
+    if (session.ok) built.push(session);
+  }
+  if (!built.length) return { ok: false, error: 'playlist has no segments' };
+
+  const payload = built[0];
+  payload.renditions = built.map((entry) => ({
+    index: entry.variant,
+    label: entry.quality,
+    bandwidth: usable[entry.variant]?.bandwidth ?? 0,
+    session: { ...entry },
+  }));
+  return payload;
+}
+
+/**
+ * Re-open an existing session on a different rendition.
+ *
+ * HLS renditions are separate playlists with their own segment counts, so a
+ * switch is a new session, not an index change: the client remounts its feeder
+ * at the current playhead and keeps playing.
+ */
+export async function switchHlsVariant(sid, index) {
+  const session = sessions.get(String(sid));
+  if (!session) return { ok: false, error: 'session expired' };
+  if (!session.variants?.length) return { ok: false, error: 'this stream has one rendition' };
+
+  const variant = session.variants[index];
+  if (!variant) return { ok: false, error: 'unknown quality' };
+
+  const headers = session.referer ? { referer: session.referer, origin: session.referer } : {};
+  let media;
+  try {
+    media = (await readPlaylist(variant.url, headers)).media;
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+
+  return buildSession({
+    id: session.id,
+    media,
+    referer: session.referer,
+    variants: session.variants,
+    variantIndex: index,
+  });
 }
 
 /** One playlist segment, proxied (and decrypted when the playlist says so). */

@@ -15,6 +15,7 @@ import { registerDash, registerHls, registerMedia, mediaPath, safeKey } from './
 import { isPlaying } from './playback.js';
 import { resolveStream } from './resolver.js';
 import { FMP4_MIMES, probeTsCodecs, tsMimes } from './tscodec.js';
+import { probeTsStartPts } from './tsprobe.js';
 
 /**
  * Download engine.
@@ -488,14 +489,18 @@ async function downloadHls(job, url, headers) {
   }
 
   // The codec list lives in the media, not the playlist: read it off the first
-  // saved segment so a local copy advertises exactly what it contains.
+  // saved segment so a local copy advertises exactly what it contains. The same
+  // head gives the first PTS, which the client needs to rebase the timeline.
   let mimes = FMP4_MIMES;
+  let startPts = 0;
   if (manifest.container === 'hls') {
     const head = await readFile(hlsSegmentFile(job.id, 0, manifest.ext)).catch(() => null);
     mimes = tsMimes(head ? probeTsCodecs(head) : null);
+    startPts = head ? probeTsStartPts(head) ?? 0 : 0;
   }
   manifest.mime = mimes[0];
   manifest.mimes = mimes;
+  manifest.startPts = startPts;
   manifest.bytes = await hlsBytes(job.id);
   manifest.savedAt = now();
   await writeHlsManifest(job.id, manifest);
@@ -684,7 +689,9 @@ async function downloadAuto(job, target) {
   job.updatedAt = now();
   // An HLS download already wrote its files and its manifest; a progressive
   // file is still sitting in the temp path and has to be moved into place.
-  if (container.kind !== 'hls') {
+  if (container.kind === 'hls') {
+    await registerHls({ id: job.id, title: job.title, source: resolved.url });
+  } else {
     const finalPath = mediaPath(job.id, container.ext);
     await rename(job.tempPath, finalPath);
     await registerMedia({
@@ -819,7 +826,9 @@ export function startDownload({ id, title, url, referer, origin, target = null }
 
       job.status = 'finalizing';
       job.updatedAt = now();
-      if (container.kind !== 'hls') {
+      if (container.kind === 'hls') {
+        await registerHls({ id: key, title: job.title, source: url });
+      } else {
         const finalPath = mediaPath(key, container.ext);
         await rename(job.tempPath, finalPath);
         await registerMedia({

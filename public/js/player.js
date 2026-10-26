@@ -1,4 +1,4 @@
-import { getPlay, getSources } from './api.js';
+import { getDashVariant, getHlsVariant, getPlay, getSources } from './api.js';
 import { createDashFeeder } from './dash.js';
 import { createHlsFeeder } from './hls.js';
 import {
@@ -406,6 +406,20 @@ export async function openPlayer(item) {
   let clickTimer = null;
   let lastSaved = 0;
   let detachStream = null;
+  // A rendition switch tears down one MediaSource and builds another. Chrome
+  // fires an error on the element for the revoked object URL, which must not be
+  // mistaken for the new stream failing — the feeders report real failures
+  // themselves.
+  let switching = false;
+  // HLS hands back a teardown function, DASH an object with destroy(); both
+  // mean stop fetching and release the element.
+  const detachFeeder = (handle) => {
+    if (!handle) return;
+    if (typeof handle === 'function') handle();
+    else handle.destroy?.();
+  };
+  let qualityMenu = null;
+  let qualityText = null;
   const listeners = [];
 
   const on = (target, event, handler, options) => {
@@ -483,6 +497,131 @@ export async function openPlayer(item) {
     noteTimer = setTimeout(() => note.classList.remove('is-visible'), ttl);
   };
 
+  /* ------------------------------ quality ------------------------------ */
+
+  qualityMenu = el('div', {
+    class: 'source-menu', role: 'dialog', 'aria-label': 'Video quality', hidden: true,
+  });
+  player.append(qualityMenu);
+
+  const closeQuality = () => { qualityMenu.hidden = true; };
+
+  const qualityVariants = () => {
+    const renditions = current?.renditions;
+    if (Array.isArray(renditions) && renditions.length) return renditions;
+    const list = current?.session?.variants;
+    return Array.isArray(list) ? list : [];
+  };
+
+  const openQuality = () => {
+    const variants = qualityVariants();
+    if (variants.length < 2) return;
+    const active = current?.session?.variant ?? 0;
+
+    qualityMenu.replaceChildren(
+      el('h3', { text: 'Quality' }),
+      ...variants.map((variant) => el('button', {
+        type: 'button',
+        class: variant.index === active ? 'is-active' : '',
+        on: {
+          click: () => {
+            closeQuality();
+            void switchQuality(variant.index);
+          },
+        },
+      },
+        el('div', { class: 'quality-item' },
+          el('span', { text: variant.label }),
+          variant.bandwidth
+            ? el('small', { text: `${(variant.bandwidth / 1_000_000).toFixed(1)} Mbps` })
+            : null,
+        ),
+        variant.index === active ? el('span', { class: 'tick', text: '✓' }) : null,
+      )),
+    );
+    qualityMenu.hidden = false;
+  };
+
+  /**
+   * Swap rendition without losing the playhead.
+   *
+   * The server pre-opens every rendition, so the common path is a local swap:
+   * the session object changes, the feeder is rebuilt at the current time, and
+   * nothing touches the network — which matters, because the feeder owns the
+   * browser's six-connection pool for the whole film.
+   */
+  const switchQuality = async (index) => {
+    const session = current?.session;
+    if (!session?.sid || !video) return;
+    if (index === session.variant) return;
+
+    const variant = qualityVariants()[index];
+    const label = variant?.label ?? 'auto';
+    const container = current.container;
+    const at = video.currentTime;
+    const wasPlaying = !video.paused;
+
+    const mountAt = (target, when) => {
+      const feeder = container === 'dash'
+        ? createDashFeeder(video, target, { startAt: when, onError: (err) => { fallbackToEmbed(err.message); } })
+        : createHlsFeeder(video, target, { startAt: when, onError: (err) => { fallbackToEmbed(err.message); } });
+      if (!feeder) {
+        fallbackToEmbed('This browser cannot decode that quality.');
+        return false;
+      }
+      detachStream = feeder;
+      if (wasPlaying) video.play().catch(() => {});
+      return true;
+    };
+
+    const apply = (next, quality) => {
+      current = { ...current, session: next, quality };
+      switching = true;
+      // Drop the old source before the old MediaSource is released: an element
+      // still pointing at a revoked object URL raises MEDIA_ERR_SRC_NOT_SUPPORTED.
+      try { video.pause(); } catch { /* already paused */ }
+      try { video.removeAttribute('src'); video.load(); } catch { /* no source yet */ }
+      detachFeeder(detachStream);
+      detachStream = null;
+      if (!mountAt(next, at)) {
+        switching = false;
+        return;
+      }
+      setTimeout(() => { switching = false; }, 1600);
+      if (qualityText) qualityText.textContent = current.quality;
+      flashNote(`Quality: ${current.quality}`, 1800);
+    };
+
+    const rendition = current.renditions?.[index];
+    if (rendition?.session) {
+      flashNote(`Switching to ${label}…`, 2000);
+      apply(rendition.session, rendition.label ?? label);
+      return;
+    }
+
+    // No pre-opened ladder (a single-rendition stream): ask the server, and
+    // stop the feeder first so the request is not queued behind segments.
+    flashNote(`Switching to ${label}…`, 8000);
+    detachFeeder(detachStream);
+    detachStream = null;
+
+    let next;
+    try {
+      const payload = container === 'dash'
+        ? await getDashVariant(session.sid, index)
+        : await getHlsVariant(session.sid, index);
+      next = payload.session;
+    } catch (err) {
+      if (closed || !video) return;
+      flashNote(err?.message ?? 'Could not switch quality', 4200);
+      mountAt(session, at);
+      return;
+    }
+    if (closed || !video || !next) return;
+
+    apply(next, next.quality ?? label);
+  };
+
   const persist = () => {
     if (!video || !item.id) return;
     if (!Number.isFinite(video.currentTime) || video.currentTime < 5) return;
@@ -500,7 +639,7 @@ export async function openPlayer(item) {
     clearTimeout(noteTimer);
     clearTimeout(clickTimer);
     for (const off of listeners) off();
-    detachStream?.();
+    detachFeeder(detachStream);
     detachStream = null;
     if (video) {
       video.pause();
@@ -517,6 +656,10 @@ export async function openPlayer(item) {
       event.preventDefault();
       if (!keysPanel.hidden) {
         toggleKeys(false);
+        return;
+      }
+      if (!qualityMenu.hidden) {
+        closeQuality();
         return;
       }
       closePlayer();
@@ -563,6 +706,7 @@ export async function openPlayer(item) {
   // Stage behaviour: one click toggles playback, two clicks go fullscreen.
   // The delay stops a double click from also toggling pause twice.
   on(stage, 'click', (event) => {
+    closeQuality();
     if (!video || event.target.closest('button, a, .player-status')) return;
     clearTimeout(clickTimer);
     clickTimer = setTimeout(() => {
@@ -602,6 +746,23 @@ export async function openPlayer(item) {
     const muteButton = el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Mute' }, icon('volume'));
     const volume = el('input', { type: 'range', min: '0', max: '1', step: '0.02', 'aria-label': 'Volume' });
     const speedButton = el('button', { class: 'pill-select', type: 'button', 'aria-label': 'Playback speed' }, el('span', { text: '1×' }));
+    // The quality ladder is whatever the provider declared. A local copy holds
+    // one rendition, so the button only exists when there is a choice.
+    const variants = qualityVariants();
+    qualityText = null;
+    const qualityButton = variants.length > 1
+      ? el('button', {
+          class: 'pill-select', type: 'button', 'aria-label': 'Video quality',
+          on: {
+            click: () => {
+              if (qualityMenu.hidden) openQuality();
+              else closeQuality();
+            },
+          },
+        },
+          qualityText = el('span', { text: current?.session?.quality ?? 'auto' }),
+          icon('down'))
+      : null;
     const pipButton = el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Picture in picture' }, icon('pip'));
     const fsButton = el('button', { class: 'ctrl', type: 'button', 'data-fs': '', 'aria-label': 'Fullscreen' }, icon('fullscreen'));
 
@@ -736,6 +897,7 @@ export async function openPlayer(item) {
         }, icon('fwd10')),
         el('div', { class: 'volume-wrap' }, muteButton, volume),
         speedButton,
+        qualityButton,
         el('div', { class: 'ctrl-spacer' }),
         pipButton,
         el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Keyboard shortcuts', on: { click: () => toggleKeys(true) } }, icon('help')),
@@ -788,9 +950,12 @@ export async function openPlayer(item) {
   const mountSource = (index) => {
     const source = sources[index];
     if (!source) return;
-    detachStream?.();
+    detachFeeder(detachStream);
     detachStream = null;
     current = source;
+    // The server pre-opens every rendition and hangs the ladder on the session;
+    // hoist it onto the source so a switch never needs a request.
+    if (source.session?.renditions?.length) current = { ...source, renditions: source.session.renditions };
     stage.replaceChildren();
     controls.replaceChildren();
     player.classList.remove('is-hidden-chrome');
@@ -896,6 +1061,7 @@ export async function openPlayer(item) {
       }, { once: true });
 
       on(video, 'error', () => {
+        if (switching) return;
         fallbackToEmbed('The stream did not respond.');
       });
 

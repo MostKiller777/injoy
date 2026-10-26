@@ -1231,6 +1231,8 @@ button { cursor: pointer; border: 0; background: none; }
 .source-menu button.is-active { background: rgba(255, 138, 61, 0.14); color: #ffc9a8; }
 .source-menu button .tick { margin-left: auto; color: var(--mint); font-weight: 900; }
 .source-menu small { display: block; font-size: 10.5px; color: var(--ink-faint); font-weight: 600; margin-top: 2px; }
+.source-menu .quality-item { display: flex; flex-direction: column; gap: 2px; }
+.source-menu .quality-item span { font-size: 13px; font-weight: 650; }
 
 .player-keys {
   position: absolute;

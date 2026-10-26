@@ -13,8 +13,8 @@ import { dataPath, dataRoot } from './lib/paths.js';
 import * as catalog from './lib/catalog.js';
 import { allMedia, loadMedia, mediaFor, mediaStats, removeMedia, serveMedia } from './lib/media.js';
 import { allJobs, cancelDownload, jobFor, startDashDownload, startDownload } from './lib/downloader.js';
-import { createDashSession, loadDashManifest, openDashSession, readSegment } from './lib/dash.js';
-import { openHlsSession, readHlsSegment } from './lib/hls.js';
+import { createDashSession, loadDashManifest, openDashSession, readSegment, switchDashVariant } from './lib/dash.js';
+import { openHlsSession, readHlsSegment, switchHlsVariant } from './lib/hls.js';
 import { openRawSession, readRaw } from './lib/raw.js';
 import { resolveStream } from './lib/resolver.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
@@ -157,6 +157,7 @@ async function resolvePlayable(id, target) {
       page,
       duration: manifest.duration,
       video: manifest.video,
+      videos: manifest.videos,
       audio: manifest.audio,
     };
   }
@@ -592,6 +593,16 @@ async function handleApi(req, res, url) {
     return json(res, 200, { id, mode: 'embed', source: fallback });
   }
 
+  // a live HLS session re-opened on another rendition, for the quality menu
+  const hlsVariantMatch = /^\/api\/hls\/variant\/([^/]+)\/(\d+)$/.exec(pathname);
+  if (hlsVariantMatch && method === 'GET') {
+    const [, sid, index] = hlsVariantMatch;
+    const switched = await switchHlsVariant(sid, Number(index));
+    if (!switched.ok) return fail(res, switched.status ?? 404, switched.error);
+    const { ok: _ok, ...session } = switched;
+    return json(res, 200, { session });
+  }
+
   // live HLS segments, proxied and decrypted on the way through
   const hlsSegMatch = /^\/api\/hls\/seg\/([^/]+)\/(\d+)$/.exec(pathname);
   if (hlsSegMatch && method === 'GET') {
@@ -623,6 +634,16 @@ async function handleApi(req, res, url) {
     res.writeHead(out.status, headers);
     if (method === 'HEAD') return res.end();
     return res.end(out.bytes);
+  }
+
+  // a live DASH session re-opened on another video rendition
+  const dashVariantMatch = /^\/api\/dash\/variant\/([^/]+)\/(\d+)$/.exec(pathname);
+  if (dashVariantMatch && method === 'GET') {
+    const [, sid, index] = dashVariantMatch;
+    const switched = switchDashVariant(sid, Number(index));
+    if (!switched.ok) return fail(res, switched.status ?? 404, switched.error);
+    const { ok: _ok, ...session } = switched;
+    return json(res, 200, { session });
   }
 
   // direct DASH: resolve an embed page to a manifest, then proxy its segments
