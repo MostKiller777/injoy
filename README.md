@@ -31,7 +31,8 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - Providers are hedged, not tried one after another: the first page gets a five-second head start, the next joins it, and the first media request wins and cancels the rest. A title only one provider carries is found in seconds instead of after a full timeout per miss. `vidsrc.pm` carries the long tail (Interstellar among them) that vidlink does not.
 - DASH streams are one HEVC video track plus one AAC audio track, played through Media Source Extensions with two SourceBuffers, a bounded eight-segment look-ahead and a rebuild on out-of-range seeks — no muxer, no ffmpeg.
 - HLS streams are muxed, so they get one SourceBuffer: the playlist is parsed once into a segment list with per-segment durations, and the feeder keeps a 40-second read-ahead and restarts the queue on a seek. MSE refuses a bare `video/mp2t`, so the server reads the codecs out of the PMT in the first segment (`server/lib/tscodec.js`) and sends a candidate list; the first one the browser accepts is used.
-- A transport stream does not start at PTS zero, so the buffered range can begin a second or two in. The feeder moves the playhead to the first byte the buffer holds, otherwise the element sits at zero with nothing to play.
+- A transport stream does not start at PTS zero, so the buffered range can begin a second or two in. The feeder moves the playhead to the first byte the buffer holds, otherwise the element sits at zero with nothing to play. After a forward seek the new range is the one that matters, not the oldest one still in the buffer.
+- A seek outside the buffered window retargets the queue instead of aborting the SourceBuffer — an interrupted append can swallow its `updateend` and leave the queue waiting on a promise nobody settles. The in-flight append finishes, the next pump jumps to the seek target, and fetches for the skipped positions are dropped.
 - Progressive files go through a same-origin proxy with Range pass-through, because the CDN wants a Referer the browser cannot set and sends no CORS header.
 - If a direct stream fails or the browser cannot decode it, the player falls back to the first embed on its own. No dead ends, no source list. That frame is deliberately **not** sandboxed: providers refuse to start their player inside a sandbox, and a frame that will not play is worse than one that can open a popup.
 - Player chrome: glass head with title and year, centre play button when paused, buffering spinner on stall, single-click play/pause, double-click fullscreen, and a `?` keyboard panel.
@@ -42,10 +43,15 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - `POST /api/download/<id>` still exists for the library view and manual re-caching; with no body it resolves and caches the title itself.
 - DASH is stored as the provider served it: `data/media/dash/<id>/{video,audio}/init.mp4` plus one `.m4s` per five seconds, described by a `manifest.json`. The client's MSE feeder points at `/api/local-dash/<id>/seg/...` instead of the network, so playback code is identical live and local.
 - Provider URLs are signed and a feature-length fetch outlives the signature. On a 401/403/404/410 the job re-resolves the manifest, keeps the fragments already on disk and resumes; a rendition change wipes the partial copy and refetches. A failed job keeps its partials, so the next play of that title picks up where it stopped.
-- HLS is handled in full - master-playlist variant selection, `#EXT-X-MAP` init segments, AES-128 keys with explicit or sequence-number IVs, and `#EXT-X-BYTERANGE` sub-ranges. Segments download six at a time but always write in playlist order. An expired URL is recovered the same way as DASH: the playlist is resolved again and the fetch continues at the next segment the file does not already hold.
+- HLS is handled in full - master-playlist variant selection, `#EXT-X-MAP` init segments, AES-128 keys with explicit or sequence-number IVs, and `#EXT-X-BYTERANGE` sub-ranges.
+- HLS lands as **one file per segment** — `data/media/hls/<id>/seg-00000.ts` plus a `manifest.json` — rather than one concatenated file. That is what makes the fetch resumable: a segment already on disk is skipped, so a job that died at 56 of 271, or a server restarted mid-fetch, continues at the first hole instead of refetching the hour. The manifest is written as soon as the playlist is parsed and rewritten at the end with the probed codecs, so an interrupted copy is still inspectable and its finished segments still play.
+- Every segment fetch gets four attempts with exponential backoff; only a 401/403/404/410 — a dead link or an expired signature — triggers a playlist re-resolve. A stalled socket costs one segment, not the job.
+- The saved HLS copy plays through the same feeder the live proxy feeds, pointed at `/api/local-hls/<id>/<n>` instead of `/api/hls/seg/...`, so there is one playback path for live and local.
+- HLS fetches are pipelined three segments ahead and appended in playlist order; a strictly serial fetch→append loop starves, because one connection delivers a four-megabyte segment slower than real time.
 - Raw `.ts` downloads play through a Media Source Extensions feeder: a bounded read-ahead window (45 s), a byte↔time checkpoint index for backward seeks, and a byte-offset estimate for forward seeks. The duration comes from a PES timestamp scan (`server/lib/tsprobe.js`), so the scrubber spans the film.
 - Files live in `data/media/`, indexed by `data/media.json`; single-file downloads are served by `/api/stream/<id>` with `206` range responses so seeking works.
 - Background caching runs one title at a time and stops at `MEDIA_CACHE_GB` (default 40 GB) of stored media. Playback is unaffected when the budget is full — the stream just stays live.
+- A cache job yields to a live stream of the same title: the proxy notes every segment it serves, and while that note is fresh (30 s) the job drops to one fetch at a time with a pause between segments. Playback gets the connection; the cache still makes progress.
 - Requires Chrome or Edge for the resolver. Downloads are otherwise dependency-free.
 
 **UI**
@@ -194,6 +200,7 @@ injoy/
 | GET | `/api/hls/seg/:sid/:n` | proxied HLS segment (decrypted when the playlist says AES-128) |
 | GET | `/api/raw/:sid` | progressive file through the proxy, Range pass-through |
 | GET | `/api/local-dash/:id/seg/:track/:n` | downloaded segment off the disk |
+| GET | `/api/local-hls/:id/:n` | downloaded HLS segment off the disk (index 0 is the init segment on fMP4 playlists) |
 | GET | `/api/local` | downloaded titles, active jobs, totals |
 | GET/HEAD | `/api/stream/:id` | local single-file download with `206` range support |
 | GET | `/api/download/:id` | job status plus the stored media record |

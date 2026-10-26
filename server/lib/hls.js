@@ -1,6 +1,7 @@
 import { createDecipheriv, randomUUID } from 'node:crypto';
 
-import { probeTsCodecs, tsMime } from './tscodec.js';
+import { FMP4_MIMES, probeTsCodecs, tsMimes } from './tscodec.js';
+import { notePlaying } from './playback.js';
 
 /**
  * Live HLS.
@@ -218,26 +219,6 @@ async function fetchHead(url, headers, limit = 384 * 1024) {
   }
 }
 
-/** Mime candidates for a muxed TS playlist: the probed one first, then guesses. */
-function tsMimes(codecs) {
-  const list = [tsMime(codecs)];
-  if (!codecs) {
-    list.push('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
-    list.push('video/mp2t; codecs="hev1.1.6.L120.90,mp4a.40.2"');
-  } else if (codecs.video.startsWith('hev') || codecs.video.startsWith('hvc')) {
-    list.push('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
-  } else {
-    list.push('video/mp2t; codecs="hev1.1.6.L120.90,mp4a.40.2"');
-  }
-  return [...new Set(list)];
-}
-
-const FMP4_MIMES = [
-  'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
-  'video/mp4; codecs="hev1.1.6.L120.90,mp4a.40.2"',
-  'video/mp4; codecs="avc1.640028,mp4a.40.2"',
-];
-
 /**
  * Resolve a manifest URL into a live session the player can drive. Returns
  * `{ ok: true, ...clientPayload }` or `{ ok: false, error }`.
@@ -333,6 +314,10 @@ export async function openHlsSession({ id, url, referer = null }) {
 export async function readHlsSegment(sid, index) {
   const session = sessions.get(String(sid));
   if (!session) return { error: 'session expired', status: 404 };
+
+  // Someone is watching this title: the cache job steps back so the stream
+  // keeps the bandwidth.
+  notePlaying(session.id);
 
   // index 0 is the init segment when the playlist has one; segments then run
   // 1..n so the client's numbering matches DASH's.

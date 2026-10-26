@@ -18,6 +18,7 @@ import { openHlsSession, readHlsSegment } from './lib/hls.js';
 import { openRawSession, readRaw } from './lib/raw.js';
 import { resolveStream } from './lib/resolver.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
+import { hlsSession, readLocalHlsSegment } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -461,6 +462,25 @@ async function handleApi(req, res, url) {
             },
           });
         }
+      } else if (media.kind === 'hls') {
+        // The saved copy is a directory of segments, so it plays through the
+        // same HLS feeder a live stream does — pointed at this disk instead.
+        const session = await hlsSession(id);
+        if (session) {
+          return json(res, 200, {
+            id,
+            mode: 'local',
+            source: {
+              provider: 'local',
+              label: 'Downloaded',
+              kind: 'direct',
+              container: session.container,
+              quality: session.quality ?? 'source',
+              duration: session.duration ?? null,
+              session,
+            },
+          });
+        }
       } else {
         return json(res, 200, {
           id,
@@ -644,6 +664,21 @@ async function handleApi(req, res, url) {
       ...SECURITY_HEADERS,
     });
     return res.end(bytes);
+  }
+
+  // downloaded HLS segments: one file per playlist entry, index 0 = init on fMP4
+  const localHlsMatch = /^\/api\/local-hls\/([^/]+)\/(\d+)$/.exec(pathname);
+  if (localHlsMatch && method === 'GET') {
+    const [, rawId, index] = localHlsMatch;
+    const segment = await readLocalHlsSegment(decodeURIComponent(rawId), Number(index));
+    if (!segment) return fail(res, 404, 'segment not on disk');
+    res.writeHead(200, {
+      'content-type': segment.contentType,
+      'content-length': segment.bytes.length,
+      'cache-control': 'public, max-age=31536000, immutable',
+      ...SECURITY_HEADERS,
+    });
+    return res.end(segment.bytes);
   }
 
   // local media: what is on disk, plus anything mid-download

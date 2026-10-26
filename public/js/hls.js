@@ -17,6 +17,7 @@
  */
 
 const LOOKAHEAD = 40;      // seconds of media kept ahead of the playhead
+const AHEAD = 3;           // segment fetches kept in flight
 const MAX_RETRIES = 3;
 
 export function createHlsFeeder(video, session, { startAt = 0, onError = null } = {}) {
@@ -28,16 +29,19 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
   const candidates = (Array.isArray(session.mimes) && session.mimes.length)
     ? session.mimes
     : [session.mime || 'video/mp2t'];
-  const total = session.segments;
+  const mediaTotal = session.segments;
+  // With an init segment the client's numbering shifts by one: index 0 is the
+  // init and the media segments run 1..n, matching what the server serves.
+  const total = mediaTotal + (hasMap ? 1 : 0);
 
   if (typeof MediaSource === 'undefined' || !candidates.some((type) => MediaSource.isTypeSupported(type))) return null;
 
   // Cumulative start time per segment; the playlist is the only index HLS has.
-  const starts = new Float64Array(total + 1);
-  for (let i = 0; i < total; i += 1) {
+  const starts = new Float64Array(mediaTotal + 1);
+  for (let i = 0; i < mediaTotal; i += 1) {
     starts[i + 1] = starts[i] + (durations[i] || session.segmentDuration || 4);
   }
-  const duration = starts[total] || session.duration || 0;
+  const duration = starts[mediaTotal] || session.duration || 0;
 
   const mediaSource = new MediaSource();
   const objectUrl = URL.createObjectURL(mediaSource);
@@ -45,6 +49,7 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
 
   let sourceBuffer = null;
   let next = 0;              // next segment index to fetch
+  let restartAt = null;      // seek target waiting for the in-flight append
   let busy = false;
   let stopped = false;
   let retries = 0;
@@ -54,13 +59,13 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
   const indexForTime = (time) => {
     if (time <= 0) return 0;
     let lo = 0;
-    let hi = total;
+    let hi = mediaTotal;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       if (starts[mid + 1] <= time) lo = mid + 1;
       else hi = mid;
     }
-    return Math.min(lo, total - 1);
+    return Math.min(lo, mediaTotal - 1);
   };
 
   const bufferedEnd = () => {
@@ -68,12 +73,35 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     return buffered && buffered.length ? buffered.end(buffered.length - 1) : 0;
   };
 
+  // Playback state for diagnostics — the queue, not the media. Small enough to
+  // leave in: a stalled stream is otherwise invisible from the outside.
+  video.__hlsState = () => ({ next, busy, restartAt, stopped, retries, landed, mediaTotal, hasMap });
+
   const covered = (time) => {
     const { buffered } = video;
     for (let i = 0; i < buffered.length; i += 1) {
       if (time >= buffered.start(i) - 0.4 && time <= buffered.end(i) - 0.15) return true;
     }
     return false;
+  };
+
+  /**
+   * The buffered range a playhead is trying to sit in.
+   *
+   * `buffered.start(0)` is the oldest range in the buffer, which is the wrong
+   * one after a seek: a jump forward leaves the old range first and the new one
+   * after it. Picking the nearest range keeps the nudge aimed at the playhead.
+   */
+  const nearestRange = (time) => {
+    const { buffered } = video;
+    let best = null;
+    for (let i = 0; i < buffered.length; i += 1) {
+      const start = buffered.start(i);
+      const end = buffered.end(i);
+      const distance = time < start ? start - time : time > end ? time - end : 0;
+      if (!best || distance < best.distance) best = { start, end, distance };
+    }
+    return best;
   };
 
   const fail = (err) => {
@@ -84,14 +112,23 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
   };
 
   const append = (bytes) => new Promise((resolve, reject) => {
-    const onEnd = () => {
+    const cleanup = () => {
+      clearTimeout(timer);
       sourceBuffer.removeEventListener('updateend', onEnd);
       sourceBuffer.removeEventListener('error', onErr);
+    };
+    // A SourceBuffer that is aborted mid-append can swallow updateend, which
+    // would leave the queue waiting forever on a promise nobody settles.
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('source buffer stalled'));
+    }, 20_000);
+    const onEnd = () => {
+      cleanup();
       resolve();
     };
     const onErr = () => {
-      sourceBuffer.removeEventListener('updateend', onEnd);
-      sourceBuffer.removeEventListener('error', onErr);
+      cleanup();
       reject(new Error('source buffer rejected a segment'));
     };
     sourceBuffer.addEventListener('updateend', onEnd);
@@ -99,8 +136,7 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     try {
       sourceBuffer.appendBuffer(bytes);
     } catch (err) {
-      sourceBuffer.removeEventListener('updateend', onEnd);
-      sourceBuffer.removeEventListener('error', onErr);
+      cleanup();
       reject(err);
     }
   });
@@ -109,6 +145,23 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     const res = await fetch(`${session.base}/${index}`, { cache: 'no-store' });
     if (!res.ok) throw new Error(`segment ${index}: HTTP ${res.status}`);
     return new Uint8Array(await res.arrayBuffer());
+  };
+
+  // Segments are a few megabytes each and one connection delivers them slower
+  // than real time, so a strictly serial fetch→append loop starves. Keep a
+  // short pipeline in flight and append it in order.
+  const inflight = new Map();
+  const startFetch = (index) => {
+    if (inflight.has(index) || index >= total) return;
+    const promise = fetchSegment(index);
+    // Handled here so a dropped fetch (a seek moved the queue past it) cannot
+    // surface as an unhandled rejection; the pump still awaits the original.
+    promise.catch(() => { inflight.delete(index); });
+    inflight.set(index, promise);
+  };
+  const fetchAhead = () => {
+    const until = Math.min(next + AHEAD, total);
+    for (let index = next; index < until; index += 1) startFetch(index);
   };
 
   const pump = async () => {
@@ -125,21 +178,30 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
 
     busy = true;
     try {
-      if (hasMap && next === 0) {
-        await append(await fetchSegment(0));
-        next = 1;
+      // A seek asked for a new start point while the previous append was in
+      // flight; honour it now that the buffer is idle.
+      if (restartAt !== null) {
+        next = restartAt;
+        restartAt = null;
+        // Drop fetches for positions the seek jumped over.
+        for (const key of [...inflight.keys()]) if (key < next) inflight.delete(key);
       }
-      const bytes = await fetchSegment(next);
+      startFetch(next);
+      fetchAhead();
+      const bytes = await inflight.get(next);
+      inflight.delete(next);
       await append(bytes);
       retries = 0;
       next += 1;
 
-      // A transport stream does not start at PTS 0, so the buffered range can
-      // begin at, say, 1.4 s. The element sits at 0 and refuses to play with no
-      // data at the playhead; nudge it to the first byte the buffer holds.
-      const start = video.buffered.length ? video.buffered.start(0) : 0;
-      if (video.currentTime < start - 0.05 && pendingSeek <= 0) {
-        try { video.currentTime = start + 0.05; } catch { /* not seekable yet */ }
+      // A transport stream does not start at PTS 0, so a buffered range can
+      // begin a second or so after the timestamp the playlist promised. The
+      // element sits just before the data and refuses to play, so snap it to
+      // the first frame the buffer actually holds — using the range nearest the
+      // playhead, not the oldest one, which is what a forward seek leaves behind.
+      const near = nearestRange(video.currentTime);
+      if (near && near.start - video.currentTime > 0.05 && near.start - video.currentTime < 5) {
+        try { video.currentTime = near.start + 0.05; } catch { /* not seekable yet */ }
       }
 
       if (!landed && pendingSeek > 0 && covered(pendingSeek)) {
@@ -149,6 +211,7 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
       if (!landed && pendingSeek === 0) landed = true;
     } catch (err) {
       if (stopped) return;
+      inflight.delete(next);
       retries += 1;
       if (retries > MAX_RETRIES) {
         fail(err);
@@ -162,7 +225,7 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     if (!stopped) setTimeout(pump, 0);
   };
 
-  mediaSource.addEventListener('sourceopen', () => {
+  mediaSource.addEventListener('sourceopen', async () => {
     for (const type of candidates) {
       if (!MediaSource.isTypeSupported(type)) continue;
       try {
@@ -179,10 +242,23 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     if (duration) {
       try { mediaSource.duration = duration; } catch { /* live playlists refuse */ }
     }
+
+    // The init segment describes the whole track, so it goes in first no matter
+    // where playback starts. Only then can a media segment be appended.
+    if (hasMap) {
+      try {
+        await append(await fetchSegment(0));
+      } catch (err) {
+        fail(err);
+        return;
+      }
+    }
+
     if (pendingSeek > 0) {
       // Start the fetch at the resume point instead of walking from zero.
-      next = indexForTime(pendingSeek);
-      if (hasMap) next += 1;
+      next = hasMap ? indexForTime(pendingSeek) + 1 : indexForTime(pendingSeek);
+    } else {
+      next = hasMap ? 1 : 0;
     }
     pump();
   });
@@ -195,13 +271,16 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
     const time = video.currentTime;
     if (covered(time)) return;
     const index = indexForTime(time);
-    if (hasMap && index === 0) return;
     const target = hasMap ? index + 1 : index;
     if (target >= next && target < next + 2) return; // already heading there
-    next = target;
-    try { sourceBuffer.abort(); } catch { /* nothing buffered */ }
-    busy = false;
-    setTimeout(pump, 0);
+    // Never abort a pending append: an interrupted append can leave the queue
+    // waiting on an updateend that never arrives. The next pump jumps forward.
+    restartAt = target;
+    if (!busy) {
+      next = restartAt;
+      restartAt = null;
+      setTimeout(pump, 0);
+    }
   };
   video.addEventListener('seeking', onSeeking);
 

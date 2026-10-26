@@ -868,8 +868,8 @@ export async function openPlayer(item) {
 
       const loader = el('div', { class: 'player-status' },
         el('div', { class: 'spinner' }),
-        el('strong', { text: local ? 'Opening local file' : 'Loading stream' }),
-        el('p', { text: local ? 'Reading from disk…' : 'Fetching the archive file…' }),
+        el('strong', { text: local ? 'Opening local copy' : 'Loading stream' }),
+        el('p', { text: local ? 'Reading from disk…' : 'Buffering the first segments…' }),
       );
 
       bigPlay = el('button', {
@@ -889,14 +889,14 @@ export async function openPlayer(item) {
           flashNote(`Resumed at ${formatTime(resume.t)}`, 3400);
         }
         if (Number.isFinite(video.duration) && video.duration > 0) {
-          const kindLabel = local ? 'Local file' : /^(dash|hls|hls-fmp4)$/.test(source.container ?? '') ? 'Direct stream' : 'Archive · direct';
+          const kindLabel = local ? 'Local copy' : /^(dash|hls|hls-fmp4)$/.test(source.container ?? '') ? 'Direct stream' : 'Direct file';
           headMeta.textContent = `${kindLabel} · ${formatTime(video.duration)}`;
         }
         tryPlay(video);
       }, { once: true });
 
       on(video, 'error', () => {
-        fallbackToEmbed('The archive file did not respond.');
+        fallbackToEmbed('The stream did not respond.');
       });
 
       saveTimer = setInterval(persist, SAVE_INTERVAL);

@@ -120,3 +120,27 @@ export function tsMime(codecs) {
   const list = codecs.audio ? `${codecs.video},${codecs.audio}` : codecs.video;
   return `video/mp2t; codecs="${list}"`;
 }
+
+/**
+ * Candidate types for a muxed transport stream: the probed one first, then the
+ * other common codec family as a fallback for a PMT that read oddly.
+ */
+export function tsMimes(codecs) {
+  const list = [tsMime(codecs)];
+  if (!codecs) {
+    list.push('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
+    list.push('video/mp2t; codecs="hev1.1.6.L120.90,mp4a.40.2"');
+  } else if (codecs.video.startsWith('hev') || codecs.video.startsWith('hvc')) {
+    list.push('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
+  } else {
+    list.push('video/mp2t; codecs="hev1.1.6.L120.90,mp4a.40.2"');
+  }
+  return [...new Set(list)];
+}
+
+/** Candidate types for an fMP4 playlist, which needs no PMT probe. */
+export const FMP4_MIMES = [
+  'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
+  'video/mp4; codecs="hev1.1.6.L120.90,mp4a.40.2"',
+  'video/mp4; codecs="avc1.640028,mp4a.40.2"',
+];

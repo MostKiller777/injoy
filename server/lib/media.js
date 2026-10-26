@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 
 import { dataPath } from './paths.js';
 import { dashBytes, dashDir, readDashManifest, removeDash } from './dashstore.js';
+import { hlsBytes, hlsDir, readHlsManifest, removeHls } from './hlsstore.js';
 import { probeTsDuration } from './tsprobe.js';
 
 /**
@@ -63,6 +64,13 @@ export async function loadMedia() {
       // A downloaded DASH title is a directory of segments, not one file.
       if (entry.kind === 'dash') {
         const manifest = await readDashManifest(id);
+        if (!manifest) continue;
+        entries.set(id, { ...entry, duration: manifest.duration ?? entry.duration ?? null });
+        continue;
+      }
+      // So is a downloaded HLS title: one file per playlist segment.
+      if (entry.kind === 'hls') {
+        const manifest = await readHlsManifest(id);
         if (!manifest) continue;
         entries.set(id, { ...entry, duration: manifest.duration ?? entry.duration ?? null });
         continue;
@@ -132,6 +140,33 @@ export async function registerMedia(entry) {
   return record;
 }
 
+/**
+ * Register a finished HLS download. The manifest on disk already knows the
+ * duration, segment count and codec list, so this only records the index entry.
+ */
+export async function registerHls({ id, title = null, source = 'download' }) {
+  const key = String(id);
+  const manifest = await readHlsManifest(key);
+  if (!manifest) throw new Error('hls manifest missing after download');
+  const record = {
+    id: key,
+    title: title ?? manifest.title ?? key,
+    kind: 'hls',
+    dir: hlsDir(key),
+    ext: 'hls',
+    mime: manifest.mime ?? 'video/mp2t',
+    bytes: manifest.bytes ?? (await hlsBytes(key)),
+    duration: manifest.duration ?? null,
+    segments: manifest.segments,
+    source,
+    createdAt: Date.now(),
+  };
+  entries.set(key, record);
+  touch();
+  await flush();
+  return record;
+}
+
 export async function registerDash({ id, title, duration = null, segments = 0 }) {
   const key = String(id);
   const bytes = await dashBytes(key);
@@ -163,6 +198,8 @@ export async function removeMedia(id) {
   await flush();
   if (record.kind === 'dash') {
     await removeDash(key);
+  } else if (record.kind === 'hls') {
+    await removeHls(key);
   } else {
     await rm(record.file, { force: true }).catch(() => {});
   }
@@ -183,10 +220,11 @@ export async function serveMedia(req, res, id) {
   }
 
   // A DASH download is a directory of segments; the player fetches those
-  // through /api/local-dash. One file cannot represent it.
-  if (record.kind === 'dash') {
+  // through /api/local-dash. An HLS download is the same shape, served per
+  // segment through /api/local-hls. One file cannot represent either.
+  if (record.kind === 'dash' || record.kind === 'hls') {
     res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: 'dash media is served per segment' }));
+    res.end(JSON.stringify({ error: `${record.kind} media is served per segment` }));
     return;
   }
 

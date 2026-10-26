@@ -1,32 +1,46 @@
 import { createDecipheriv } from 'node:crypto';
-import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { dashSegmentUrl, loadDashManifest, resolveDashTracks } from './dash.js';
 import { dashSegmentFile, prepareDashDir, removeDash, writeDashManifest } from './dashstore.js';
-import { registerDash, registerMedia, mediaPath, safeKey } from './media.js';
+import {
+  firstMissingHlsSegment,
+  hlsBytes,
+  hlsInitFile,
+  hlsSegmentFile,
+  prepareHlsDir,
+  writeHlsManifest,
+} from './hlsstore.js';
+import { registerDash, registerHls, registerMedia, mediaPath, safeKey } from './media.js';
+import { isPlaying } from './playback.js';
 import { resolveStream } from './resolver.js';
+import { FMP4_MIMES, probeTsCodecs, tsMimes } from './tscodec.js';
 
 /**
  * Download engine.
  *
  * Two shapes arrive from the embed resolvers: a progressive file, or an HLS
- * playlist. Both end as one file on disk, because one file is what a <video>
- * tag and a byte-range request can seek through.
+ * playlist. A progressive file lands as one file on disk, because one file is
+ * what a <video> tag and a byte-range request can seek through. An HLS playlist
+ * lands as a directory of segments instead — the player already consumes HLS
+ * segment by segment, and one file per segment is what makes a fetch resumable.
  *
  * HLS handling that matters in practice:
  * - master playlists: pick the highest-bandwidth variant
- * - `#EXT-X-MAP`: prepend the init segment (this is what makes the result a
- *   fragmented MP4 instead of an unplayable bag of fragments)
+ * - `#EXT-X-MAP`: save the init segment, which is what makes fMP4 playable
  * - `#EXT-X-KEY` AES-128: decrypt per segment, explicit IV or sequence number
  * - `#EXT-X-BYTERANGE`: sub-range requests against a single hosting file
- * - segments download out of order but write in order, so a slow segment never
- *   reorders the timeline
+ * - an expired signed URL: resolve the playlist again and continue at the first
+ *   segment that is not on disk, so an hour of video is never refetched
  */
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36';
 const CONCURRENCY = 6;
 const REQUEST_TIMEOUT = 30_000;
 const MAX_SEGMENTS = 20_000;
+// A single stalled connection should cost one segment, not the whole job: a
+// feature-length fetch is hundreds of requests and one of them will hang.
+const SEGMENT_ATTEMPTS = 4;
 // DASH downloads ride signed URLs that expire long before a feature-length
 // fetch finishes, so the job refreshes the manifest instead of dying.
 const DASH_CONCURRENCY = 6;
@@ -159,6 +173,9 @@ function parseSegments(url, text) {
   const base = url;
 
   const segments = [];
+  const durations = [];
+  let total = 0;
+  let pendingDuration = 0;
   let map = null;
   let key = null;
   let pendingRange = null;
@@ -190,6 +207,11 @@ function parseSegments(url, text) {
       continue;
     }
 
+    if (line.startsWith('#EXTINF:')) {
+      pendingDuration = Number.parseFloat(line.slice(line.indexOf(':') + 1)) || 0;
+      continue;
+    }
+
     if (line.startsWith('#EXT-X-BYTERANGE:')) {
       pendingRange = line.slice(line.indexOf(':') + 1);
       continue;
@@ -203,10 +225,15 @@ function parseSegments(url, text) {
       key,
       index: segments.length,
     });
+    // The playlist's EXTINF values are the only per-segment timing that exists;
+    // the player needs them to map a seek position back to a segment index.
+    durations.push(pendingDuration);
+    total += pendingDuration;
+    pendingDuration = 0;
     pendingRange = null;
   }
 
-  return { segments: segments.slice(0, MAX_SEGMENTS), map };
+  return { segments: segments.slice(0, MAX_SEGMENTS), durations, total, map };
 }
 
 function rangeHeader(range, cursor) {
@@ -253,12 +280,40 @@ async function fetchSegment(segment, headers, signal, keyCache, rangeCursor) {
   return decrypt(buffer, keyBytes, ivFor(segment.key, segment.index));
 }
 
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+/** A status worth retrying: the CDN is busy, not the request is wrong. */
+const TRANSIENT_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * One segment, with a few attempts.
+ *
+ * A 404 is a dead link and a 403 is an expired signature — both are the caller's
+ * problem to solve by re-resolving, so they are returned immediately. A timeout,
+ * a reset socket or a 503 is weather, and weather gets retried with backoff.
+ */
+async function fetchSegmentWithRetry(segment, headers, signal, keyCache) {
+  let lastError = null;
+  for (let attempt = 0; attempt < SEGMENT_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetchSegment(segment, headers, signal, keyCache, 0);
+    } catch (err) {
+      lastError = err;
+      if (signal?.aborted) throw err;
+      const transient = !err.status || TRANSIENT_STATUS.has(err.status);
+      if (!transient) throw err;
+      await sleep(Math.min(6000, 400 * 2 ** attempt));
+    }
+  }
+  throw lastError;
+}
+
 /** Decide the saved container from what the playlist actually contains. */
 function containerFor(map, firstSegment) {
-  if (map) return { ext: '.mp4', playable: true };
+  if (map) return { kind: 'hls', ext: '.m4s', playable: true };
   const name = (firstSegment?.url ?? '').toLowerCase();
-  if (name.includes('.mp4') || name.includes('.m4s')) return { ext: '.mp4', playable: true };
-  return { ext: '.ts', playable: false };
+  if (name.includes('.mp4') || name.includes('.m4s')) return { kind: 'hls', ext: '.m4s', playable: true };
+  return { kind: 'hls', ext: '.ts', playable: true };
 }
 
 async function downloadProgressive(job, url, headers) {
@@ -309,108 +364,143 @@ async function downloadProgressive(job, url, headers) {
 }
 
 /**
- * Save an HLS playlist as one file, in playlist order.
+ * Save an HLS playlist as one file per segment.
  *
- * A feature-length fetch outlives the provider's signed URL, so an expiry
- * mid-run is expected rather than fatal: the playlist is resolved again and the
- * fetch continues from the next segment the file does not already hold. The
- * init segment is only written once — it belongs at the head of the file.
+ * Per-segment files are what make the job resumable: a segment already on disk
+ * is skipped, so an expiry, a stalled connection, or a server restart continues
+ * at the first hole instead of refetching an hour of video. The saved copy is
+ * then played through the very same feeder the live proxy feeds.
  */
 async function downloadHls(job, url, headers) {
-  await mkdir(dirname(job.tempPath), { recursive: true });
-  const handle = await open(job.tempPath, 'w');
+  await prepareHlsDir(job.id);
   const keyCache = new Map();
 
-  let writeCursor = 0;
-  let written = 0;
-  let container = { ext: '.ts', playable: false };
   let currentUrl = url;
   let currentHeaders = headers;
   let refreshes = 0;
+  let manifest = null;
+  let written = 0;
 
-  try {
-    while (true) {
-      const media = await resolveMediaPlaylist(currentUrl, currentHeaders, job.controller.signal);
-      const { segments, map } = parseSegments(media.url, media.text);
-      if (!segments.length) throw new Error('playlist has no segments');
+  for (;;) {
+    const media = await resolveMediaPlaylist(currentUrl, currentHeaders, job.controller.signal);
+    const { segments, durations, total, map } = parseSegments(media.url, media.text);
+    if (!segments.length) throw new Error('playlist has no segments');
 
-      // A shorter playlist means the provider switched rendition; the bytes on
-      // disk no longer line up with it, so the resume would splice two encodes.
-      if (written > segments.length) throw new Error('stream changed while downloading');
+    const container = containerFor(map, segments[0]);
+    const ext = container.ext;
 
-      container = containerFor(map, segments[0]);
-      job.segmentsTotal = segments.length;
-      job.container = container;
+    // A different segment count after a refresh means the provider switched
+    // rendition; the files on disk belong to another encode.
+    if (manifest && manifest.segments !== segments.length) throw new Error('stream changed while downloading');
 
-      if (written === 0 && map) {
+    job.segmentsTotal = segments.length;
+    job.container = container;
+
+    if (!manifest) {
+      manifest = {
+        id: job.id,
+        title: job.title,
+        container: map ? 'hls-fmp4' : 'hls',
+        ext,
+        quality: 'auto',
+        segments: segments.length,
+        durations,
+        duration: Math.round(total * 1000) / 1000,
+        segmentDuration: durations.length ? Math.round((total / durations.length) * 1000) / 1000 : 4,
+      };
+
+      // Written now, not just at the end: a job that is interrupted still has a
+      // manifest describing what the files on disk are, and the segment route
+      // can serve them.
+      await writeHlsManifest(job.id, manifest);
+
+      if (map) {
         const { header } = rangeHeader(map.range, 0);
         const { buffer } = await request(map.url, {
           headers: header ? { ...currentHeaders, range: header } : currentHeaders,
           signal: job.controller.signal,
         });
-        await handle.write(buffer, 0, buffer.length, writeCursor);
-        writeCursor += buffer.length;
+        await writeFile(hlsInitFile(job.id), buffer);
         job.bytes += buffer.length;
       }
 
-      // Sliding window: keep CONCURRENCY fetches in flight, write strictly in
-      // playlist order so the byte stream stays a valid timeline.
-      const pending = new Map();
-      let nextToStart = written;
-      let nextToWrite = written;
-      let failure = null;
+      // A previous attempt may have saved the first half; start at the hole.
+      written = await firstMissingHlsSegment(job.id, ext, segments.length);
+      job.segmentsDone = written;
+      job.bytes = await hlsBytes(job.id);
+      job.updatedAt = now();
+    }
 
-      const startOne = (index) => {
-        const promise = fetchSegment(segments[index], currentHeaders, job.controller.signal, keyCache, 0)
-          .then((buffer) => ({ index, buffer }))
-          .catch((err) => ({ index, error: err }));
-        pending.set(index, promise);
-      };
+    // Sliding window: keep CONCURRENCY fetches in flight, write strictly in
+    // playlist order so no segment is ever missing from the middle.
+    const pending = new Map();
+    let nextToStart = written;
+    let nextToWrite = written;
+    let failure = null;
 
-      while (nextToWrite < segments.length) {
-        if (job.cancelled) throw new Error('cancelled');
-        if (failure) break;
+    const startOne = (index) => {
+      const promise = fetchSegmentWithRetry(segments[index], currentHeaders, job.controller.signal, keyCache)
+        .then((buffer) => ({ index, buffer }))
+        .catch((err) => ({ index, error: err }));
+      pending.set(index, promise);
+    };
 
-        while (pending.size < CONCURRENCY && nextToStart < segments.length) {
-          startOne(nextToStart);
-          nextToStart += 1;
-        }
+    while (nextToWrite < segments.length) {
+      if (job.cancelled) throw new Error('cancelled');
+      if (failure) break;
 
-        const settled = await pending.get(nextToWrite);
-        pending.delete(nextToWrite);
-        if (settled.error) {
-          failure = settled.error;
-          break;
-        }
-
-        await handle.write(settled.buffer, 0, settled.buffer.length, writeCursor);
-        writeCursor += settled.buffer.length;
-        job.bytes += settled.buffer.length;
-        written += 1;
-        job.segmentsDone = written;
-        job.updatedAt = now();
-        nextToWrite += 1;
+      // Someone watching this title gets the connection; the cache trickles.
+      const watching = isPlaying(job.id);
+      while (pending.size < (watching ? 1 : CONCURRENCY) && nextToStart < segments.length) {
+        startOne(nextToStart);
+        nextToStart += 1;
       }
 
-      if (!failure) break;
+      const settled = await pending.get(nextToWrite);
+      pending.delete(nextToWrite);
+      if (settled.error) {
+        failure = settled.error;
+        break;
+      }
 
-      const expired = [401, 403, 404, 410].includes(failure.status);
-      if (!expired || !job.target || refreshes >= MAX_URL_REFRESH) throw failure;
-
-      refreshes += 1;
-      job.refreshes = refreshes;
-      const fresh = await resolveStream(job.target);
-      if (!fresh.url || !/\.m3u8(\?|$)/i.test(fresh.url)) throw failure;
-      currentUrl = fresh.url;
-      currentHeaders = fresh.referer
-        ? { referer: fresh.referer, origin: new URL(fresh.referer).origin }
-        : {};
+      await writeFile(hlsSegmentFile(job.id, nextToWrite, ext), settled.buffer);
+      job.bytes += settled.buffer.length;
+      written = nextToWrite + 1;
+      job.segmentsDone = written;
+      job.updatedAt = now();
+      nextToWrite += 1;
+      if (watching) await sleep(1200);
     }
-  } finally {
-    await handle.close();
+
+    if (!failure) break;
+
+    const expired = [401, 403, 404, 410].includes(failure.status);
+    if (!expired || !job.target || refreshes >= MAX_URL_REFRESH) throw failure;
+
+    refreshes += 1;
+    job.refreshes = refreshes;
+    const fresh = await resolveStream(job.target);
+    if (!fresh.url || !/\.m3u8(\?|$)/i.test(fresh.url)) throw failure;
+    currentUrl = fresh.url;
+    currentHeaders = fresh.referer
+      ? { referer: fresh.referer, origin: new URL(fresh.referer).origin }
+      : {};
   }
 
-  return container;
+  // The codec list lives in the media, not the playlist: read it off the first
+  // saved segment so a local copy advertises exactly what it contains.
+  let mimes = FMP4_MIMES;
+  if (manifest.container === 'hls') {
+    const head = await readFile(hlsSegmentFile(job.id, 0, manifest.ext)).catch(() => null);
+    mimes = tsMimes(head ? probeTsCodecs(head) : null);
+  }
+  manifest.mime = mimes[0];
+  manifest.mimes = mimes;
+  manifest.bytes = await hlsBytes(job.id);
+  manifest.savedAt = now();
+  await writeHlsManifest(job.id, manifest);
+
+  return { kind: 'hls', ext: manifest.ext, playable: true };
 }
 
 /**
@@ -521,6 +611,8 @@ async function downloadDash(job, found) {
       cursor += 1;
       if (index > segments) return;
       await Promise.all([save('video', index), save('audio', index)]);
+      // Playback of this title owns the connection while it lasts.
+      if (isPlaying(job.id)) await sleep(1500);
     }
   };
   await Promise.all(Array.from({ length: DASH_CONCURRENCY }, worker));
@@ -590,15 +682,19 @@ async function downloadAuto(job, target) {
 
   job.status = 'finalizing';
   job.updatedAt = now();
-  const finalPath = mediaPath(job.id, container.ext);
-  await rename(job.tempPath, finalPath);
-  await registerMedia({
-    id: job.id,
-    title: job.title,
-    file: finalPath,
-    ext: container.ext,
-    source: resolved.url,
-  });
+  // An HLS download already wrote its files and its manifest; a progressive
+  // file is still sitting in the temp path and has to be moved into place.
+  if (container.kind !== 'hls') {
+    const finalPath = mediaPath(job.id, container.ext);
+    await rename(job.tempPath, finalPath);
+    await registerMedia({
+      id: job.id,
+      title: job.title,
+      file: finalPath,
+      ext: container.ext,
+      source: resolved.url,
+    });
+  }
 
   return container;
 }
@@ -723,15 +819,17 @@ export function startDownload({ id, title, url, referer, origin, target = null }
 
       job.status = 'finalizing';
       job.updatedAt = now();
-      const finalPath = mediaPath(key, container.ext);
-      await rename(job.tempPath, finalPath);
-      await registerMedia({
-        id: key,
-        title: job.title,
-        file: finalPath,
-        ext: container.ext,
-        source: url,
-      });
+      if (container.kind !== 'hls') {
+        const finalPath = mediaPath(key, container.ext);
+        await rename(job.tempPath, finalPath);
+        await registerMedia({
+          id: key,
+          title: job.title,
+          file: finalPath,
+          ext: container.ext,
+          source: url,
+        });
+      }
 
       job.playable = container.playable;
       job.container = container;
@@ -741,6 +839,7 @@ export function startDownload({ id, title, url, referer, origin, target = null }
       job.status = job.cancelled ? 'cancelled' : 'error';
       job.error = err.message;
       job.updatedAt = now();
+      // A failed HLS job keeps its segment files — the next attempt resumes.
       await rm(job.tempPath, { force: true }).catch(() => {});
     }
   })();
