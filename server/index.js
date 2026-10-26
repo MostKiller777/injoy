@@ -13,7 +13,10 @@ import { dataPath, dataRoot } from './lib/paths.js';
 import * as catalog from './lib/catalog.js';
 import { allMedia, loadMedia, mediaFor, mediaStats, removeMedia, serveMedia } from './lib/media.js';
 import { allJobs, cancelDownload, jobFor, startDashDownload, startDownload } from './lib/downloader.js';
-import { createDashSession, openDashSession, readSegment, resolveDashTracks } from './lib/dash.js';
+import { createDashSession, loadDashManifest, openDashSession, readSegment } from './lib/dash.js';
+import { openHlsSession, readHlsSegment } from './lib/hls.js';
+import { openRawSession, readRaw } from './lib/raw.js';
+import { resolveStream } from './lib/resolver.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
 import { seriesStreamTarget } from './lib/series.js';
 
@@ -124,6 +127,55 @@ function cacheSlotAvailable() {
 
 // One resolver run per title, even when several tabs press play together.
 const playInflight = new Map();
+
+/**
+ * Resolve a title to something the player can mount.
+ *
+ * Providers answer in three shapes: DASH (two tracks, numbered fragments), HLS
+ * (a playlist of muxed segments) and a plain progressive file. DASH needs its
+ * manifest read and its tracks registered; HLS needs its playlist parsed and
+ * proxied; progressive just needs a same-origin URL with Range support. All
+ * three end up as a `direct` source, so the client never learns which one it
+ * got — it mounts whatever session it is handed.
+ */
+async function resolvePlayable(id, target) {
+  const resolved = await resolveStream(target);
+  if (!resolved.url) return { ok: false, error: resolved.error ?? 'no provider produced a stream' };
+
+  const referer = resolved.referer ?? null;
+  const page = resolved.page ?? null;
+
+  if (resolved.type === 'dash') {
+    const manifest = await loadDashManifest(resolved.url, referer);
+    if (!manifest.ok) return { ok: false, error: manifest.error };
+    return {
+      ok: true,
+      kind: 'dash',
+      url: resolved.url,
+      referer,
+      page,
+      duration: manifest.duration,
+      video: manifest.video,
+      audio: manifest.audio,
+    };
+  }
+
+  if (resolved.type === 'hls') {
+    const session = await openHlsSession({ id, url: resolved.url, referer });
+    if (!session.ok) return { ok: false, error: session.error };
+    const { ok: _ok, ...payload } = session;
+    return { ok: true, kind: 'hls', url: resolved.url, referer, page, session: payload };
+  }
+
+  return {
+    ok: true,
+    kind: 'progressive',
+    url: resolved.url,
+    referer,
+    page,
+    session: openRawSession({ id, url: resolved.url, referer }),
+  };
+}
 
 async function readBody(req, limit = 262_144) {
   const chunks = [];
@@ -434,13 +486,13 @@ async function handleApi(req, res, url) {
 
     let pending = playInflight.get(id);
     if (!pending) {
-      pending = resolveDashTracks(target).catch((err) => ({ ok: false, error: err.message }));
+      pending = resolvePlayable(id, target).catch((err) => ({ ok: false, error: err.message }));
       playInflight.set(id, pending);
       pending.finally(() => playInflight.delete(id));
     }
     const found = await pending;
 
-    if (found.ok) {
+    if (found.ok && found.kind === 'dash') {
       const session = createDashSession(id, found);
       let caching = false;
       if (cacheSlotAvailable()) {
@@ -463,11 +515,94 @@ async function handleApi(req, res, url) {
       });
     }
 
+    // HLS is already muxed, so the player gets one segment list instead of two
+    // tracks. The downloader saves the same playlist to disk in the background
+    // when a cache slot is free, which is what flips this title to `local` later.
+    if (found.ok && found.kind === 'hls') {
+      const { session } = found;
+      let caching = false;
+      if (cacheSlotAvailable()) {
+        const job = startDownload({
+          id,
+          title: meta.title ?? id,
+          url: found.url,
+          referer: found.referer ?? undefined,
+          target,
+        });
+        caching = ['resolving', 'downloading', 'finalizing'].includes(job.status);
+      }
+      return json(res, 200, {
+        id,
+        mode: 'live',
+        caching,
+        source: {
+          provider: 'direct',
+          label: 'injoy',
+          kind: 'direct',
+          container: session.container,
+          quality: session.quality ?? 'auto',
+          duration: session.duration,
+          session,
+        },
+      });
+    }
+
+    // A progressive file plays natively; the proxy exists only to add the
+    // Referer the CDN wants and the CORS header the browser needs.
+    if (found.ok && found.kind === 'progressive') {
+      return json(res, 200, {
+        id,
+        mode: 'live',
+        caching: false,
+        source: {
+          provider: 'direct',
+          label: 'injoy',
+          kind: 'direct',
+          container: 'progressive',
+          quality: 'auto',
+          url: found.session.base,
+        },
+      });
+    }
+
     // No direct stream: hand the player one embed, still without a picker.
     const data = await catalog.sources(id).catch(() => null);
     const fallback = (data?.sources ?? []).find((source) => source.kind === 'embed');
     if (!fallback) return fail(res, 502, found.error ?? 'no source available');
     return json(res, 200, { id, mode: 'embed', source: fallback });
+  }
+
+  // live HLS segments, proxied and decrypted on the way through
+  const hlsSegMatch = /^\/api\/hls\/seg\/([^/]+)\/(\d+)$/.exec(pathname);
+  if (hlsSegMatch && method === 'GET') {
+    const [, sid, index] = hlsSegMatch;
+    const segment = await readHlsSegment(sid, Number(index));
+    if (segment.error) return fail(res, segment.status ?? 502, segment.error);
+    res.writeHead(200, {
+      'content-type': segment.contentType,
+      'content-length': segment.bytes.length,
+      'cache-control': segment.cacheControl ?? 'private, max-age=300',
+      ...SECURITY_HEADERS,
+    });
+    return res.end(segment.bytes);
+  }
+
+  // progressive file, Range pass-through so the element can seek
+  const rawMatch = /^\/api\/raw\/([^/]+)$/.exec(pathname);
+  if (rawMatch && (method === 'GET' || method === 'HEAD')) {
+    const out = await readRaw(rawMatch[1], req.headers.range ?? null);
+    if (out.error) return fail(res, out.status ?? 502, out.error);
+    const headers = {
+      'content-type': out.contentType,
+      'content-length': out.bytes.length,
+      'accept-ranges': out.acceptRanges,
+      'cache-control': 'private, max-age=600',
+      ...SECURITY_HEADERS,
+    };
+    if (out.contentRange) headers['content-range'] = out.contentRange;
+    res.writeHead(out.status, headers);
+    if (method === 'HEAD') return res.end();
+    return res.end(out.bytes);
   }
 
   // direct DASH: resolve an embed page to a manifest, then proxy its segments

@@ -71,9 +71,10 @@ function pickCandidate(text) {
  * makes. Resolves to `{ url, type, referer }` or null when nothing surfaces
  * inside the timeout.
  */
-export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600 } = {}) {
+export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600, signal = null } = {}) {
   const chrome = chromePath();
   if (!chrome) return { error: 'no chrome or edge binary found' };
+  if (signal?.aborted) return { error: 'cancelled' };
 
   const dir = await mkdtemp(join(tmpdir(), 'injoy-sniff-'));
   const netlog = join(dir, 'netlog.json');
@@ -102,6 +103,7 @@ export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600 } 
   try {
     while (Date.now() < deadline) {
       await sleep(pollMs);
+      if (signal?.aborted) return { error: 'cancelled' };
       const info = await stat(netlog).catch(() => null);
       if (!info || info.size === lastSize) continue;
       lastSize = info.size;
@@ -120,9 +122,11 @@ export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600 } 
 
 function filmEmbeds(tmdbId, imdbId) {
   const list = [];
-  // vidlink answers in a few seconds and hands back a real manifest; the rest
+  // vidlink answers in a few seconds and hands back a real manifest; vidsrc.pm
+  // carries the long tail vidlink is missing (Interstellar among them). The rest
   // are slower and mostly return nothing, so they only ever run as fallbacks.
   if (tmdbId) list.push(`https://vidlink.pro/movie/${tmdbId}`);
+  if (tmdbId) list.push(`https://vidsrc.pm/embed/movie/${tmdbId}`);
   list.push(`https://vidsrc.to/embed/movie/${tmdbId}`);
   list.push(`https://www.2embed.cc/embed/${tmdbId}`);
   list.push(`https://vidsrc.me/embed/movie?tmdb=${tmdbId}`);
@@ -133,6 +137,7 @@ function filmEmbeds(tmdbId, imdbId) {
 function episodeEmbeds(tmdbId, imdbId, season, episode) {
   const list = [];
   if (tmdbId) list.push(`https://vidlink.pro/tv/${tmdbId}/${season}/${episode}`);
+  if (tmdbId) list.push(`https://vidsrc.pm/embed/tv/${tmdbId}/${season}/${episode}`);
   if (imdbId) {
     list.push(`https://vidsrc.to/embed/tv?imdb=${imdbId}&season=${season}&episode=${episode}`);
     list.push(`https://www.2embed.cc/embedtv/${imdbId}&s=${season}&e=${episode}`);
@@ -144,11 +149,19 @@ function episodeEmbeds(tmdbId, imdbId, season, episode) {
   return list;
 }
 
+// How long a provider runs alone before the next one is launched alongside it.
+// Serial hunting made a miss cost a full 30 s timeout each, so an unavailable
+// title took two minutes to give up; hedging overlaps the waits instead.
+const HEDGE_MS = 5_000;
+
 /**
- * Try each embed page in turn until one produces a media request. Each attempt
- * is a fresh headless browser, so a dead provider costs one timeout, not the
- * job. The first hit wins: DASH plays through MSE, HLS and MP4 through the
- * native element, so there is no reason to keep hunting once one lands.
+ * Try the embed pages until one produces a media request.
+ *
+ * Providers are hedged rather than raced flat: the first page gets a head start,
+ * the next joins after `HEDGE_MS`, and the first hit wins and cancels the rest.
+ * That keeps the fast provider's quality when it answers, without paying its
+ * full timeout when it does not. Each attempt is a fresh headless browser, so a
+ * dead provider costs one timeout, not the whole resolution.
  */
 export async function resolveStream({ tmdbId, imdbId = null, season = null, episode = null, onAttempt = null }) {
   const pages = season && episode
@@ -156,13 +169,45 @@ export async function resolveStream({ tmdbId, imdbId = null, season = null, epis
     : filmEmbeds(tmdbId, imdbId);
 
   const tried = [];
+  if (!pages.length) return { error: 'no provider for this title', tried };
 
-  for (const page of pages) {
-    onAttempt?.(page);
-    const result = await sniffStream(page);
-    tried.push({ page, ...result });
-    if (result.url) return { ...result, page, tried };
-  }
+  const controller = new AbortController();
 
-  return { error: 'no provider produced a stream', tried };
+  return new Promise((resolve) => {
+    let settled = false;
+    let launched = 0;
+    const timers = [];
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      for (const timer of timers) clearTimeout(timer);
+      controller.abort();
+      resolve(result);
+    };
+
+    const launch = () => {
+      if (settled || launched >= pages.length) return;
+      const page = pages[launched];
+      launched += 1;
+      onAttempt?.(page);
+
+      sniffStream(page, { signal: controller.signal }).then((result) => {
+        tried.push({ page, ...result });
+        if (result.url) {
+          finish({ ...result, page, tried });
+          return;
+        }
+        if (tried.length >= pages.length) {
+          finish({ error: 'no provider produced a stream', tried });
+          return;
+        }
+        launch();
+      });
+
+      if (launched < pages.length) timers.push(setTimeout(launch, HEDGE_MS));
+    };
+
+    launch();
+  });
 }

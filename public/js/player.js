@@ -1,5 +1,6 @@
 import { getPlay, getSources } from './api.js';
 import { createDashFeeder } from './dash.js';
+import { createHlsFeeder } from './hls.js';
 import {
   progressFor,
   rememberShown,
@@ -385,7 +386,10 @@ export async function openPlayer(item) {
 
   const root = document.getElementById('player-root');
   if (!root) return;
-  if (root.childElementCount) closePlayer();
+  // A player already open (the detail page auto-plays, then the visitor presses
+  // play again) gets closed first. The button is used rather than the local
+  // handler because that handler is declared further down this function.
+  if (root.childElementCount) root.querySelector('.player-close')?.click();
 
   document.body.classList.add('is-locked');
 
@@ -794,7 +798,7 @@ export async function openPlayer(item) {
       ? 'Third-party source'
       : source.provider === 'local'
         ? 'Local file'
-        : source.container === 'dash' ? 'Direct stream' : 'Archive · direct';
+        : /^(dash|hls|hls-fmp4)$/.test(source.container ?? '') ? 'Direct stream' : 'Archive · direct';
     clearInterval(saveTimer);
     video = null;
     iframe = null;
@@ -826,6 +830,19 @@ export async function openPlayer(item) {
           startAt: resumePoint ?? 0,
           onError: (err) => { fallbackToEmbed(err.message); },
         });
+      }
+
+      // HLS arrives muxed — one segment list, one SourceBuffer. The feeder owns
+      // the read-ahead window and the seek restart; the element only plays.
+      if ((source.container === 'hls' || source.container === 'hls-fmp4') && source.session) {
+        detachStream = createHlsFeeder(video, source.session, {
+          startAt: resumePoint ?? 0,
+          onError: (err) => { fallbackToEmbed(err.message); },
+        });
+        if (!detachStream) {
+          fallbackToEmbed('This browser cannot decode the direct stream.');
+          return;
+        }
       }
 
       if (isTransportStream) {
@@ -872,7 +889,7 @@ export async function openPlayer(item) {
           flashNote(`Resumed at ${formatTime(resume.t)}`, 3400);
         }
         if (Number.isFinite(video.duration) && video.duration > 0) {
-          const kindLabel = local ? 'Local file' : source.container === 'dash' ? 'Direct stream' : 'Archive · direct';
+          const kindLabel = local ? 'Local file' : /^(dash|hls|hls-fmp4)$/.test(source.container ?? '') ? 'Direct stream' : 'Archive · direct';
           headMeta.textContent = `${kindLabel} · ${formatTime(video.duration)}`;
         }
         tryPlay(video);
@@ -934,9 +951,9 @@ export async function openPlayer(item) {
     return;
   }
 
-  // A browser without HEVC MSE cannot take the direct stream; drop to the
-  // embed before mounting instead of after a black frame.
-  if (source.container === 'dash' && source.session && !canPlayDash(source.session)) {
+  // A browser without the right MSE codec cannot take the direct stream; drop
+  // to the embed before mounting instead of after a black frame.
+  if (source.session && !canPlaySession(source)) {
     await fallbackToEmbed('This browser cannot decode the direct stream.');
     return;
   }
@@ -946,14 +963,23 @@ export async function openPlayer(item) {
 }
 
 /**
- * DASH needs MSE and a decoder for both tracks. HEVC is the common case on the
- * providers and Chrome only exposes it where the OS can decode it, so the check
- * is made before the source is offered rather than after it fails.
+ * MSE needs a SourceBuffer type the decoder accepts. HEVC is the common case on
+ * the providers and Chrome only exposes it where the OS can decode it, so the
+ * check is made before the source is offered rather than after it fails. HLS
+ * asks the same question about its muxed container.
  */
-function canPlayDash(session) {
+function canPlaySession(source) {
   if (typeof MediaSource === 'undefined') return false;
+  const session = source.session;
   try {
-    return MediaSource.isTypeSupported(session.video.mime) && MediaSource.isTypeSupported(session.audio.mime);
+    if (source.container === 'dash') {
+      return MediaSource.isTypeSupported(session.video.mime) && MediaSource.isTypeSupported(session.audio.mime);
+    }
+    if (source.container === 'hls' || source.container === 'hls-fmp4') {
+      const list = Array.isArray(session.mimes) && session.mimes.length ? session.mimes : [session.mime];
+      return list.some((type) => MediaSource.isTypeSupported(type));
+    }
+    return true;
   } catch {
     return false;
   }

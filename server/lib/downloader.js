@@ -38,15 +38,23 @@ const now = () => Date.now();
 
 function jobView(job) {
   const elapsed = Math.max(1, now() - job.startedAt) / 1000;
+  // A single-file fetch knows its size up front; a segmented one only knows how
+  // many segments it has to get, so that is the percentage it reports.
+  const percent = job.total > 0
+    ? Math.min(100, Math.round((job.bytes / job.total) * 100))
+    : job.segmentsTotal > 0
+      ? Math.min(100, Math.round((job.segmentsDone / job.segmentsTotal) * 100))
+      : null;
   return {
     id: job.id,
     title: job.title,
     status: job.status,
     bytes: job.bytes,
     total: job.total,
-    percent: job.total > 0 ? Math.min(100, Math.round((job.bytes / job.total) * 100)) : null,
+    percent,
     segmentsDone: job.segmentsDone,
     segmentsTotal: job.segmentsTotal,
+    refreshes: job.refreshes ?? 0,
     speed: Math.round(job.bytes / elapsed),
     error: job.error ?? null,
     container: job.container ?? null,
@@ -300,68 +308,103 @@ async function downloadProgressive(job, url, headers) {
   return { ext, playable: true };
 }
 
+/**
+ * Save an HLS playlist as one file, in playlist order.
+ *
+ * A feature-length fetch outlives the provider's signed URL, so an expiry
+ * mid-run is expected rather than fatal: the playlist is resolved again and the
+ * fetch continues from the next segment the file does not already hold. The
+ * init segment is only written once — it belongs at the head of the file.
+ */
 async function downloadHls(job, url, headers) {
-  const media = await resolveMediaPlaylist(url, headers, job.controller.signal);
-  const { segments, map } = parseSegments(media.url, media.text);
-  if (!segments.length) throw new Error('playlist has no segments');
-
-  const container = containerFor(map, segments[0]);
-  const keyCache = new Map();
-  job.segmentsTotal = segments.length;
-  job.container = container;
-
   await mkdir(dirname(job.tempPath), { recursive: true });
   const handle = await open(job.tempPath, 'w');
+  const keyCache = new Map();
+
   let writeCursor = 0;
+  let written = 0;
+  let container = { ext: '.ts', playable: false };
+  let currentUrl = url;
+  let currentHeaders = headers;
+  let refreshes = 0;
 
   try {
-    if (map) {
-      const { header } = rangeHeader(map.range, 0);
-      const { buffer } = await request(map.url, {
-        headers: header ? { ...headers, range: header } : headers,
-        signal: job.controller.signal,
-      });
-      await handle.write(buffer, 0, buffer.length, writeCursor);
-      writeCursor += buffer.length;
-      job.bytes += buffer.length;
-    }
+    while (true) {
+      const media = await resolveMediaPlaylist(currentUrl, currentHeaders, job.controller.signal);
+      const { segments, map } = parseSegments(media.url, media.text);
+      if (!segments.length) throw new Error('playlist has no segments');
 
-    // Sliding window: keep CONCURRENCY fetches in flight, write strictly in
-    // playlist order so the byte stream stays a valid timeline.
-    const pending = new Map();
-    let nextToStart = 0;
-    let nextToWrite = 0;
-    let failure = null;
+      // A shorter playlist means the provider switched rendition; the bytes on
+      // disk no longer line up with it, so the resume would splice two encodes.
+      if (written > segments.length) throw new Error('stream changed while downloading');
 
-    const startOne = (index) => {
-      const promise = fetchSegment(segments[index], headers, job.controller.signal, keyCache, 0)
-        .then((buffer) => ({ index, buffer }))
-        .catch((err) => ({ index, error: err }));
-      pending.set(index, promise);
-    };
+      container = containerFor(map, segments[0]);
+      job.segmentsTotal = segments.length;
+      job.container = container;
 
-    while (nextToWrite < segments.length) {
-      if (job.cancelled) throw new Error('cancelled');
-      if (failure) throw failure;
-
-      while (pending.size < CONCURRENCY && nextToStart < segments.length) {
-        startOne(nextToStart);
-        nextToStart += 1;
+      if (written === 0 && map) {
+        const { header } = rangeHeader(map.range, 0);
+        const { buffer } = await request(map.url, {
+          headers: header ? { ...currentHeaders, range: header } : currentHeaders,
+          signal: job.controller.signal,
+        });
+        await handle.write(buffer, 0, buffer.length, writeCursor);
+        writeCursor += buffer.length;
+        job.bytes += buffer.length;
       }
 
-      const settled = await pending.get(nextToWrite);
-      pending.delete(nextToWrite);
-      if (settled.error) {
-        failure = settled.error;
-        continue;
+      // Sliding window: keep CONCURRENCY fetches in flight, write strictly in
+      // playlist order so the byte stream stays a valid timeline.
+      const pending = new Map();
+      let nextToStart = written;
+      let nextToWrite = written;
+      let failure = null;
+
+      const startOne = (index) => {
+        const promise = fetchSegment(segments[index], currentHeaders, job.controller.signal, keyCache, 0)
+          .then((buffer) => ({ index, buffer }))
+          .catch((err) => ({ index, error: err }));
+        pending.set(index, promise);
+      };
+
+      while (nextToWrite < segments.length) {
+        if (job.cancelled) throw new Error('cancelled');
+        if (failure) break;
+
+        while (pending.size < CONCURRENCY && nextToStart < segments.length) {
+          startOne(nextToStart);
+          nextToStart += 1;
+        }
+
+        const settled = await pending.get(nextToWrite);
+        pending.delete(nextToWrite);
+        if (settled.error) {
+          failure = settled.error;
+          break;
+        }
+
+        await handle.write(settled.buffer, 0, settled.buffer.length, writeCursor);
+        writeCursor += settled.buffer.length;
+        job.bytes += settled.buffer.length;
+        written += 1;
+        job.segmentsDone = written;
+        job.updatedAt = now();
+        nextToWrite += 1;
       }
 
-      await handle.write(settled.buffer, 0, settled.buffer.length, writeCursor);
-      writeCursor += settled.buffer.length;
-      job.bytes += settled.buffer.length;
-      job.segmentsDone += 1;
-      job.updatedAt = now();
-      nextToWrite += 1;
+      if (!failure) break;
+
+      const expired = [401, 403, 404, 410].includes(failure.status);
+      if (!expired || !job.target || refreshes >= MAX_URL_REFRESH) throw failure;
+
+      refreshes += 1;
+      job.refreshes = refreshes;
+      const fresh = await resolveStream(job.target);
+      if (!fresh.url || !/\.m3u8(\?|$)/i.test(fresh.url)) throw failure;
+      currentUrl = fresh.url;
+      currentHeaders = fresh.referer
+        ? { referer: fresh.referer, origin: new URL(fresh.referer).origin }
+        : {};
     }
   } finally {
     await handle.close();
@@ -407,6 +450,7 @@ async function downloadDash(job, found) {
     if (!job.target) throw new Error('stream URL expired and this title cannot be re-resolved');
     if (refreshes >= MAX_URL_REFRESH) throw new Error('stream URL kept expiring; gave up');
     refreshes += 1;
+    job.refreshes = refreshes;
 
     refreshPending = (async () => {
       const next = await resolveDashTracks(job.target);
@@ -631,6 +675,7 @@ export function startDownload({ id, title, url, referer, origin, target = null }
   if (active) return jobView(existing);
 
   const job = createJob(key, title, url);
+  job.target = target ?? null;
 
   if (!url) {
     if (!target) return jobView(job);

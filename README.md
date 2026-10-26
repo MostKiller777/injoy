@@ -13,7 +13,7 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 ## What it does
 
 **Catalog**
-- Curated-only shelf (no key required): 500 hand-picked films across eight genre rails — Noir, Horror, Sci-Fi, Comedy, Drama, Western, Animation, Documentary — with real posters/backdrops and nine playable sources each. Search matches titles, directors, years and genres, and survives typos via a five-character prefix pass.
+- Curated-only shelf (no key required): 500 hand-picked films across eight genre rails — Noir, Horror, Sci-Fi, Comedy, Drama, Western, Animation, Documentary — with real posters/backdrops. Search matches titles, directors, years and genres, and survives typos via a five-character prefix pass.
 - Genre rails are built from the catalog's own genre tags: TMDB names for the seven real genres, plus a local `Noir` tag because TMDB has no noir genre.
 - Artwork comes from the TMDB image CDN for the first shelf, the Letterboxd CDN for the later ones, and the TVMaze CDN for series; all of it is served through the same `/api/img` proxy.
 - Adult and exploitation titles are excluded from the catalog.
@@ -27,9 +27,13 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - The Mentalist leads the home Series row: 7 seasons, 151 episodes.
 
 **Playback**
-- One source, chosen by the server: the player never shows a picker and the visitor never downloads anything. `/api/play/:id` answers with a local copy when one exists, otherwise a direct DASH stream, otherwise one embed.
-- Direct streams are DASH: one HEVC video track, one AAC audio track. The client plays them through Media Source Extensions with two SourceBuffers, a bounded eight-segment look-ahead and a rebuild on out-of-range seeks — no muxer, no ffmpeg.
-- If a direct stream fails or the browser cannot decode HEVC, the player falls back to the first embed on its own. No dead ends, no source list.
+- One source, chosen by the server: the player never shows a picker and the visitor never downloads anything. `/api/play/:id` answers with a local copy when one exists, otherwise a direct stream — DASH, HLS or a progressive file — otherwise one embed.
+- Providers are hedged, not tried one after another: the first page gets a five-second head start, the next joins it, and the first media request wins and cancels the rest. A title only one provider carries is found in seconds instead of after a full timeout per miss. `vidsrc.pm` carries the long tail (Interstellar among them) that vidlink does not.
+- DASH streams are one HEVC video track plus one AAC audio track, played through Media Source Extensions with two SourceBuffers, a bounded eight-segment look-ahead and a rebuild on out-of-range seeks — no muxer, no ffmpeg.
+- HLS streams are muxed, so they get one SourceBuffer: the playlist is parsed once into a segment list with per-segment durations, and the feeder keeps a 40-second read-ahead and restarts the queue on a seek. MSE refuses a bare `video/mp2t`, so the server reads the codecs out of the PMT in the first segment (`server/lib/tscodec.js`) and sends a candidate list; the first one the browser accepts is used.
+- A transport stream does not start at PTS zero, so the buffered range can begin a second or two in. The feeder moves the playhead to the first byte the buffer holds, otherwise the element sits at zero with nothing to play.
+- Progressive files go through a same-origin proxy with Range pass-through, because the CDN wants a Referer the browser cannot set and sends no CORS header.
+- If a direct stream fails or the browser cannot decode it, the player falls back to the first embed on its own. No dead ends, no source list. That frame is deliberately **not** sandboxed: providers refuse to start their player inside a sandbox, and a frame that will not play is worse than one that can open a popup.
 - Player chrome: glass head with title and year, centre play button when paused, buffering spinner on stall, single-click play/pause, double-click fullscreen, and a `?` keyboard panel.
 - Progress is written on pause, on close, and on tab hide. Resume is offered automatically past the 20-second mark.
 
@@ -37,7 +41,8 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - Playback also caches: the same resolver run that starts a direct stream hands its tracks to the downloader, which saves every fragment to disk in the background. The next play of that title comes off the disk — `mode: "local"` — with no third-party request at all.
 - `POST /api/download/<id>` still exists for the library view and manual re-caching; with no body it resolves and caches the title itself.
 - DASH is stored as the provider served it: `data/media/dash/<id>/{video,audio}/init.mp4` plus one `.m4s` per five seconds, described by a `manifest.json`. The client's MSE feeder points at `/api/local-dash/<id>/seg/...` instead of the network, so playback code is identical live and local.
-- HLS is handled in full — master-playlist variant selection, `#EXT-X-MAP` init segments, AES-128 keys with explicit or sequence-number IVs, and `#EXT-X-BYTERANGE` sub-ranges. Segments download six at a time but always write in playlist order.
+- Provider URLs are signed and a feature-length fetch outlives the signature. On a 401/403/404/410 the job re-resolves the manifest, keeps the fragments already on disk and resumes; a rendition change wipes the partial copy and refetches. A failed job keeps its partials, so the next play of that title picks up where it stopped.
+- HLS is handled in full - master-playlist variant selection, `#EXT-X-MAP` init segments, AES-128 keys with explicit or sequence-number IVs, and `#EXT-X-BYTERANGE` sub-ranges. Segments download six at a time but always write in playlist order. An expired URL is recovered the same way as DASH: the playlist is resolved again and the fetch continues at the next segment the file does not already hold.
 - Raw `.ts` downloads play through a Media Source Extensions feeder: a bounded read-ahead window (45 s), a byte↔time checkpoint index for backward seeks, and a byte-offset estimate for forward seeks. The duration comes from a PES timestamp scan (`server/lib/tsprobe.js`), so the scrubber spans the film.
 - Files live in `data/media/`, indexed by `data/media.json`; single-file downloads are served by `/api/stream/<id>` with `206` range responses so seeking works.
 - Background caching runs one title at a time and stops at `MEDIA_CACHE_GB` (default 40 GB) of stored media. Playback is unaffected when the budget is full — the stream just stays live.
@@ -183,9 +188,11 @@ injoy/
 | GET | `/api/genres` | the eight genre rails with counts |
 | GET | `/api/movie/:id` | full detail; id is `tmdb:550` or `tv:116` |
 | GET | `/api/sources/:id` | every source, local first; `tmdb:550` or `tv:116:1:2` |
-| GET | `/api/play/:id` | the one source the player should mount (local, DASH, or embed) |
+| GET | `/api/play/:id` | the one source the player should mount (local, DASH, HLS, progressive, or embed) |
 | GET | `/api/dash/:id` | resolve a live DASH session (`sid`, tracks, segment count) |
 | GET | `/api/dash/seg/:sid/:track/:n` | proxied provider segment |
+| GET | `/api/hls/seg/:sid/:n` | proxied HLS segment (decrypted when the playlist says AES-128) |
+| GET | `/api/raw/:sid` | progressive file through the proxy, Range pass-through |
 | GET | `/api/local-dash/:id/seg/:track/:n` | downloaded segment off the disk |
 | GET | `/api/local` | downloaded titles, active jobs, totals |
 | GET/HEAD | `/api/stream/:id` | local single-file download with `206` range support |
