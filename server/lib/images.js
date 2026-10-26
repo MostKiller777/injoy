@@ -2,6 +2,9 @@ const ALLOWED = [
   /^(?:[a-z0-9-]+\.)*tmdb\.org$/i,
   /^(?:[a-z0-9-]+\.)*ltrbxd\.com$/i,
   /^(?:[a-z0-9-]+\.)*tvmaze\.com$/i,
+  // Wikipedia's media host: the only place with art for the titles Letterboxd
+  // has no backdrop for.
+  /^(?:[a-z0-9-]+\.)*wikimedia\.org$/i,
 ];
 
 /**
