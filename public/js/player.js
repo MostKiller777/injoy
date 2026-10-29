@@ -551,6 +551,7 @@ export async function openPlayer(item) {
     : null;
   let episodesPanel = null;
   let episodesButton = null;
+  let episodesLauncher = null;
 
   const episodeLabel = () => {
     if (!currentEpisode) return 'Episodes';
@@ -558,9 +559,13 @@ export async function openPlayer(item) {
   };
 
   const paintEpisodeButton = () => {
-    if (!episodesButton) return;
-    episodesButton.replaceChildren(icon('list'), el('span', { text: `Episodes · ${episodeLabel()}` }));
-    episodesButton.setAttribute('aria-label', `Episodes — currently season ${currentEpisode?.season ?? 1} episode ${currentEpisode?.number ?? 1}`);
+    const label = `Episodes · ${episodeLabel()}`;
+    const aria = `Episodes — currently season ${currentEpisode?.season ?? 1} episode ${currentEpisode?.number ?? 1}`;
+    for (const button of [episodesButton, episodesLauncher]) {
+      if (!button) continue;
+      button.replaceChildren(icon('list'), el('span', { text: label }));
+      button.setAttribute('aria-label', aria);
+    }
   };
 
   if (seasons.length) {
@@ -627,6 +632,18 @@ export async function openPlayer(item) {
     });
     player.append(episodesPanel);
     paintSeason(currentEpisode?.season ?? seasons[0].number);
+
+    // Keep one launcher visible even when the playback chrome fades away. The
+    // bottom control is convenient while paused; this one makes every season
+    // discoverable during playback and on embed fallbacks.
+    episodesLauncher = el('button', {
+      class: 'episodes-launcher', type: 'button',
+      title: 'Seasons and episodes',
+      'aria-label': 'Seasons and episodes',
+      on: { click: () => toggleEpisodes() },
+    });
+    player.append(episodesLauncher);
+    paintEpisodeButton();
   }
 
   function toggleEpisodes(force) {

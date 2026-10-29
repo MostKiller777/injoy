@@ -1510,6 +1510,39 @@ kbd {
 .episodes-toggle { font-variant-numeric: tabular-nums; }
 .episodes-toggle svg { width: 12px; height: 12px; }
 
+/* Persistent series access. Playback chrome fades while a direct stream plays;
+   this launcher deliberately sits outside that chrome so seasons remain one
+   tap away instead of disappearing with the controls. */
+.episodes-launcher {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  right: 78px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  max-width: min(220px, calc(100vw - 150px));
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(8, 9, 15, 0.78);
+  backdrop-filter: blur(12px);
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 750;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background var(--fast), border-color var(--fast), transform var(--fast);
+}
+.episodes-launcher:hover {
+  background: rgba(255, 138, 61, 0.2);
+  border-color: var(--acc-2);
+  transform: translateY(-1px);
+}
+.episodes-launcher svg { width: 13px; height: 13px; flex: none; }
+
 
 .player-note {
   position: absolute;
@@ -1547,6 +1580,7 @@ kbd {
   .player-bigplay svg { width: 26px; height: 26px; }
   .player-keys { padding: 14px; }
   .player-note { top: 60px; max-width: calc(100vw - 24px); text-align: center; }
+  .episodes-launcher { right: 62px; top: max(10px, env(safe-area-inset-top)); max-width: 150px; padding: 6px 10px; font-size: 10.5px; }
 }
 
 @media (max-width: 460px) {
