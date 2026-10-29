@@ -559,12 +559,16 @@ export async function openPlayer(item) {
   };
 
   const paintEpisodeButton = () => {
-    const label = `Episodes · ${episodeLabel()}`;
-    const aria = `Episodes — currently season ${currentEpisode?.season ?? 1} episode ${currentEpisode?.number ?? 1}`;
-    for (const button of [episodesButton, episodesLauncher]) {
-      if (!button) continue;
-      button.replaceChildren(icon('list'), el('span', { text: label }));
-      button.setAttribute('aria-label', aria);
+    if (episodesButton) {
+      episodesButton.replaceChildren(icon('list'), el('span', { text: `Episodes · ${episodeLabel()}` }));
+      episodesButton.setAttribute('aria-label', `Episodes — currently season ${currentEpisode?.season ?? 1} episode ${currentEpisode?.number ?? 1}`);
+    }
+    if (episodesLauncher) {
+      episodesLauncher.replaceChildren(
+        icon('list'),
+        el('span', { text: `All seasons · ${seasons.length}` }),
+      );
+      episodesLauncher.setAttribute('aria-label', `All ${seasons.length} seasons — currently season ${currentEpisode?.season ?? 1} episode ${currentEpisode?.number ?? 1}`);
     }
   };
 
@@ -618,8 +622,8 @@ export async function openPlayer(item) {
       el('div', { class: 'episodes-card' },
         el('div', { class: 'episodes-head' },
           el('div', {},
-            el('h3', { text: item.title.split(' — ')[0] }),
-            el('p', { class: 'episodes-sub', text: `${seasons.length} seasons · ${seasons.reduce((sum, season) => sum + season.episodes.length, 0)} episodes` }),
+            el('h3', { text: `${item.title.split(' — ')[0]} — all seasons` }),
+            el('p', { class: 'episodes-sub', text: `${seasons.length} seasons · ${seasons.reduce((sum, season) => sum + season.episodes.length, 0)} episodes · playback continues behind this` }),
           ),
           el('button', { class: 'keys-close', type: 'button', 'aria-label': 'Close episodes', on: { click: () => toggleEpisodes(false) } }, icon('close')),
         ),
@@ -638,12 +642,11 @@ export async function openPlayer(item) {
     // discoverable during playback and on embed fallbacks.
     episodesLauncher = el('button', {
       class: 'episodes-launcher', type: 'button',
-      title: 'Seasons and episodes',
-      'aria-label': 'Seasons and episodes',
+      title: `All ${seasons.length} seasons`,
+      'aria-label': `All ${seasons.length} seasons`,
       on: { click: () => toggleEpisodes() },
-    });
+    }, icon('list'), el('span', { text: `All seasons · ${seasons.length}` }));
     player.append(episodesLauncher);
-    paintEpisodeButton();
   }
 
   function toggleEpisodes(force) {
@@ -1649,6 +1652,11 @@ export async function openPlayer(item) {
   }
 
   await startPlayback(item.playId ?? item.id);
+
+  // A show opens straight into an episode, so the season list must be in front
+  // of the viewer once instead of hidden behind a control. Playback keeps
+  // running underneath; dismissing the drawer leaves you on the episode.
+  if (seasons.length) toggleEpisodes(true);
 }
 
 /**
