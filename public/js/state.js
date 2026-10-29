@@ -257,6 +257,19 @@ export function setCaptionSize(size) {
   persistPrefs();
 }
 
+/**
+ * Caption sync, in seconds.
+ *
+ * Index subtitles are timed for one specific release, so the cues can land a
+ * beat early or late on the copy being played. The value is kept with the size
+ * and applied by shifting every cue of the showing track.
+ */
+export function setCaptionOffset(offset) {
+  const value = Number(offset);
+  state.prefs.captionOffset = Number.isFinite(value) ? Math.max(-30, Math.min(30, Math.round(value * 10) / 10)) : 0;
+  persistPrefs();
+}
+
 export function continueCount() {
   return recentItems().length;
 }

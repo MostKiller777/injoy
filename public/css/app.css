@@ -1287,6 +1287,56 @@ button { cursor: pointer; border: 0; background: none; }
   background: rgba(255, 138, 61, 0.18);
   color: #ffc9a8;
 }
+
+/* Sync nudges. The value in the middle is a button too — tapping it puts the
+   track back on the file's own timing, which is the escape hatch after a
+   handful of half-second corrections. */
+.caption-offset-group { display: flex; gap: 4px; margin-left: auto; align-items: center; }
+.source-menu .caption-offset-group button {
+  width: auto;
+  padding: 6px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.source-menu .caption-offset-group button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--ink);
+}
+.source-menu .caption-offset-group .caption-offset-value {
+  min-width: 62px;
+  justify-content: center;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: var(--ink);
+}
+
+/* Language filter. Thirty rows is a wall; typing three letters is not. */
+.caption-search {
+  width: 100%;
+  margin: 2px 0 6px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+.caption-search::placeholder { color: var(--ink-faint); }
+.caption-search:focus { outline: none; border-color: var(--acc-2); background: rgba(255, 255, 255, 0.08); }
+
+.caption-list { display: flex; flex-direction: column; gap: 1px; }
+.caption-empty {
+  margin: 6px 10px 8px;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
 .pill-select.is-on { border-color: var(--acc-2); color: #ffc9a8; background: rgba(255, 138, 61, 0.16); }
 
 .player-keys {
@@ -1334,6 +1384,130 @@ kbd {
   color: var(--ink);
 }
 .keys-foot { margin: 12px 0 0; font-size: 11.5px; color: var(--ink-faint); line-height: 1.55; }
+
+/* --------------------------------------------------------------------------
+   Episode drawer.
+
+   The player opens a show at the resume point, so the detail sheet's season
+   browser is behind the video and unreachable. This is the same browser, laid
+   over the frame: season tabs across the top, the chosen season's episodes
+   scrolling underneath, current episode marked. Sized off the viewport so a
+   23-episode season does not push the card past the bottom of the screen.
+   -------------------------------------------------------------------------- */
+
+.player-episodes {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 3, 7, 0.74);
+  backdrop-filter: blur(8px);
+  animation: fade 160ms ease both;
+}
+.player-episodes[hidden] { display: none; }
+
+.episodes-card {
+  width: min(560px, 100%);
+  max-height: min(78vh, 660px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line-strong);
+  background: rgba(12, 13, 20, 0.97);
+  box-shadow: var(--shadow);
+  padding: 18px 20px 16px;
+  animation: pop 220ms var(--ease) both;
+}
+
+.episodes-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 4px;
+}
+.episodes-head h3 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.episodes-sub {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.player-episodes .season-tabs { margin: 12px 0 12px; }
+.player-episodes .season-tab { padding: 6px 13px; font-size: 0.8rem; }
+
+/* The list is the only part that scrolls: the head and the tabs stay put while
+   a long season runs past them. */
+.player-episodes .episode-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  gap: 4px;
+}
+
+.player-episodes .episode {
+  grid-template-columns: 30px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--ink-dim);
+  text-align: left;
+  transition: background var(--fast), border-color var(--fast), color var(--fast);
+}
+.player-episodes .episode:hover {
+  background: rgba(255, 255, 255, 0.085);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--ink);
+}
+.player-episodes .episode:focus-visible {
+  outline: 2px solid var(--acc-2);
+  outline-offset: 2px;
+}
+.player-episodes .episode-num {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.player-episodes .episode-name { font-size: 13px; font-weight: 650; }
+.player-episodes .episode-meta { font-size: 11px; color: var(--ink-faint); }
+
+/* The episode already playing reads as a status line, not a link. */
+.player-episodes .episode.is-current {
+  border-color: var(--acc-2);
+  background: rgba(255, 138, 61, 0.14);
+  color: #ffc9a8;
+  cursor: default;
+}
+.player-episodes .episode.is-current .episode-num { color: var(--acc-2); }
+.player-episodes .episode-now {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--acc-2);
+  white-space: nowrap;
+}
+
+/* In the control bar the button carries the current episode number, so the
+   drawer is one glance away without opening it. */
+.episodes-toggle { font-variant-numeric: tabular-nums; }
+.episodes-toggle svg { width: 12px; height: 12px; }
+
 
 .player-note {
   position: absolute;

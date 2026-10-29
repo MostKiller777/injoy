@@ -175,6 +175,23 @@ export function createDashFeeder(video, session, { startAt = 0, onError } = {}) 
   return {
     kind: 'dash',
     duration: totalDuration,
+    /**
+     * Jump to a time the element cannot reach on its own.
+     *
+     * MSE exposes only the buffered ranges as `seekable`, so assigning a time
+     * outside them is silently clamped to the nearest edge — which is why a
+     * rewind used to do nothing once the window had moved on. The caller hands
+     * the intended target here instead and the pipeline is rebuilt around it.
+     */
+    seek(time) {
+      if (destroyed) return;
+      const target = Math.max(0, Math.min(totalDuration || Infinity, Number(time) || 0));
+      if (isBuffered(target)) {
+        try { video.currentTime = target; } catch { /* not seekable yet */ }
+        return;
+      }
+      rebuild(target);
+    },
     destroy() {
       destroyed = true;
       video.removeEventListener('timeupdate', onTimeUpdate);

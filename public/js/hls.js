@@ -358,11 +358,35 @@ export function createHlsFeeder(video, session, { startAt = 0, onError = null } 
 
   detachCurrent = mount(startAt);
 
-  return () => {
+  /**
+   * The handle is the teardown function plus the two things the player needs
+   * from a feeder it cannot get off the element: where the timeline ends, and a
+   * seek that reaches past the buffered window.
+   *
+   * `video.currentTime = t` is clamped to `video.seekable`, and for MSE that is
+   * the buffered ranges and nothing else. Rewinding past the oldest buffered
+   * range therefore did nothing: the element snapped back to the range edge, the
+   * feeder saw a covered position, and the playhead never moved. Handing the
+   * target here skips the clamp — a covered target is a plain seek, anything
+   * else gets a fresh mount at that position.
+   */
+  const handle = () => {
     closed = true;
     clearTimeout(remountTimer);
     remountTimer = null;
     try { detachCurrent?.(); } catch { /* already detached */ }
     detachCurrent = null;
   };
+  handle.duration = duration;
+  handle.seek = (time) => {
+    if (closed) return;
+    const target = Math.max(0, Math.min(duration || Infinity, Number(time) || 0));
+    if (covered(target)) {
+      seekTo(target);
+      return;
+    }
+    remount(target);
+  };
+
+  return handle;
 }

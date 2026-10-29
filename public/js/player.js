@@ -6,6 +6,7 @@ import {
   progressFor,
   rememberShown,
   saveProgress,
+  setCaptionOffset,
   setCaptionSize,
   setVolume,
   state,
@@ -74,6 +75,7 @@ function createTransportStreamFeeder(videoEl, url, { duration = null, bytes = nu
   let restartTo = null;      // pending re-fetch target after a backward seek
   let roomWaiter = null;
   let primed = false;        // the element has been placed on the timeline once
+  let basePts = null;        // media time of the first appended frame
   const desiredStart = Number.isFinite(startAt) && startAt > 0 ? startAt : null;
 
   videoEl.src = objectUrl;
@@ -259,6 +261,7 @@ function createTransportStreamFeeder(videoEl, url, { duration = null, bytes = nu
       if (!primed && videoEl.buffered.length) {
         primed = true;
         const first = videoEl.buffered.start(0);
+        basePts = first;
         // The probe measured a span, not an absolute time; the real end of the
         // film is the first timestamp plus that span.
         if (Number.isFinite(duration) && duration > 0) {
@@ -351,7 +354,7 @@ function createTransportStreamFeeder(videoEl, url, { duration = null, bytes = nu
     }
   }
 
-  return () => {
+  const handle = () => {
     stopped = true;
     controller?.abort();
     pending = [];
@@ -361,6 +364,20 @@ function createTransportStreamFeeder(videoEl, url, { duration = null, bytes = nu
     videoEl.removeAttribute('src');
     videoEl.load();
   };
+
+  /**
+   * A raw transport stream carries absolute PTS, so its timeline rarely starts
+   * at zero, and the element will not seek outside what it has buffered. The
+   * player asks for a position in film time; this translates it onto the
+   * stream's own clock and lets `jumpTo` re-open the byte range for it.
+   */
+  handle.seek = (time) => {
+    if (stopped) return;
+    const offset = Math.max(0, Number(time) || 0);
+    jumpTo((basePts ?? 0) + offset);
+  };
+
+  return handle;
 }
 
 function tryPlay(video) {
@@ -421,6 +438,30 @@ export async function openPlayer(item) {
     if (typeof handle === 'function') handle();
     else handle.destroy?.();
   };
+
+  /**
+   * Every seek in this player goes through here.
+   *
+   * Assigning `video.currentTime` directly only works inside the buffered
+   * window: MSE reports the buffered ranges as `seekable`, so anything outside
+   * them is clamped to the nearest edge and the playhead never moves — a rewind
+   * past the oldest buffered second did nothing at all. The feeder knows how to
+   * rebuild around a distant target, so the target is handed to it instead of
+   * to the element.
+   */
+  const seekToTime = (time, noteText = null) => {
+    const duration = Number.isFinite(video?.duration) && video.duration > 0
+      ? video.duration
+      : Number.isFinite(current?.duration) && current.duration > 0 ? current.duration : null;
+    const raw = Number(time);
+    const target = Math.max(0, duration ? Math.min(duration, Number.isFinite(raw) ? raw : 0) : (Number.isFinite(raw) ? raw : 0));
+    if (detachStream?.seek) detachStream.seek(target);
+    else if (video) {
+      try { video.currentTime = target; } catch { /* not seekable yet */ }
+    }
+    if (noteText) flashNote(noteText, 1100);
+    return target;
+  };
   let qualityMenu = null;
   let qualityText = null;
   let captionMenu = null;
@@ -428,6 +469,7 @@ export async function openPlayer(item) {
   let captionTracks = [];
   let activeCaption = null;
   let captionSize = CAPTION_SIZES.includes(state.prefs.captionSize) ? state.prefs.captionSize : 'middle';
+  let captionOffset = Number(state.prefs.captionOffset) || 0;
   let captionToken = 0;
   const listeners = [];
 
@@ -487,6 +529,144 @@ export async function openPlayer(item) {
   function toggleKeys(force) {
     keysPanel.hidden = force === undefined ? !keysPanel.hidden : !force;
   }
+
+  /* ------------------------------ episodes ------------------------------ */
+
+  /**
+   * The season browser, inside the player.
+   *
+   * A show opened from a card starts playing straight away — no episode picker
+   * in the way, which is what makes opening a series one click. That used to
+   * also mean the season list was unreachable, because the player covered the
+   * detail sheet that carries it. The drawer puts every season and every
+   * episode one tap away, and switching episodes re-opens playback in place
+   * instead of closing the player.
+   */
+  const seasons = Array.isArray(item.seasons) ? item.seasons : [];
+  const episodeParts = /^tv:(\d+):(\d+):(\d+)$/.exec(String(item.playId ?? ''));
+  let currentEpisode = episodeParts
+    ? { season: Number(episodeParts[2]), number: Number(episodeParts[3]) }
+    : null;
+  let episodesPanel = null;
+  let episodesButton = null;
+
+  const episodeLabel = () => {
+    if (!currentEpisode) return 'Episodes';
+    return `S${currentEpisode.season}E${currentEpisode.number}`;
+  };
+
+  const paintEpisodeButton = () => {
+    if (!episodesButton) return;
+    episodesButton.replaceChildren(icon('list'), el('span', { text: episodeLabel() }));
+    episodesButton.setAttribute('aria-label', `Episodes — currently season ${currentEpisode?.season ?? 1} episode ${currentEpisode?.number ?? 1}`);
+  };
+
+  if (seasons.length) {
+    episodesButton = el('button', {
+      class: 'pill-select episodes-toggle', type: 'button', 'aria-label': 'Episodes',
+      on: { click: () => toggleEpisodes() },
+    });
+    paintEpisodeButton();
+
+    const tabs = el('div', { class: 'season-tabs', role: 'tablist', 'aria-label': 'Seasons' });
+    const list = el('div', { class: 'episode-list' });
+
+    const paintSeason = (number) => {
+      const season = seasons.find((entry) => entry.number === number) ?? seasons[0];
+      for (const tab of tabs.querySelectorAll('.season-tab')) {
+        const active = Number(tab.dataset.season) === season.number;
+        tab.classList.toggle('is-active', active);
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      }
+      list.replaceChildren(...season.episodes.map((episode) => {
+        const active = currentEpisode?.season === season.number && currentEpisode?.number === episode.number;
+        return el('button', {
+          type: 'button',
+          class: active ? 'episode is-current' : 'episode',
+          on: { click: () => { void switchEpisode(season.number, episode); } },
+        },
+          el('span', { class: 'episode-num', text: String(episode.number).padStart(2, '0') }),
+          el('span', { class: 'episode-body' },
+            el('span', { class: 'episode-name', text: episode.name }),
+            episode.airdate
+              ? el('span', { class: 'episode-meta', text: String(episode.airdate).slice(0, 4) })
+              : null,
+          ),
+          active ? el('span', { class: 'episode-now', text: 'Playing' }) : null,
+        );
+      }));
+      list.scrollTop = 0;
+    };
+
+    for (const season of seasons) {
+      tabs.append(el('button', {
+        class: 'season-tab', type: 'button', role: 'tab',
+        'data-season': String(season.number),
+        'aria-selected': 'false',
+        on: { click: () => paintSeason(season.number) },
+      }, `Season ${season.number}`));
+    }
+
+    episodesPanel = el('div', { class: 'player-episodes', role: 'dialog', 'aria-label': 'Episodes', hidden: true },
+      el('div', { class: 'episodes-card' },
+        el('div', { class: 'episodes-head' },
+          el('div', {},
+            el('h3', { text: item.title.split(' — ')[0] }),
+            el('p', { class: 'episodes-sub', text: `${seasons.length} seasons · ${seasons.reduce((sum, season) => sum + season.episodes.length, 0)} episodes` }),
+          ),
+          el('button', { class: 'keys-close', type: 'button', 'aria-label': 'Close episodes', on: { click: () => toggleEpisodes(false) } }, icon('close')),
+        ),
+        tabs,
+        list,
+      ),
+    );
+    episodesPanel.addEventListener('click', (event) => {
+      if (event.target === episodesPanel) toggleEpisodes(false);
+    });
+    player.append(episodesPanel);
+    paintSeason(currentEpisode?.season ?? seasons[0].number);
+  }
+
+  function toggleEpisodes(force) {
+    if (!episodesPanel) return;
+    const next = force === undefined ? episodesPanel.hidden : Boolean(force);
+    episodesPanel.hidden = !next;
+    if (next) closeQuality();
+  }
+
+  /**
+   * Move the player to another episode without closing it.
+   *
+   * The progress of the episode being left is written first — otherwise a jump
+   * at 40 minutes would lose the resume point — and the caption list is dropped
+   * because it belongs to the episode, not the show.
+   */
+  async function switchEpisode(seasonNumber, episode) {
+    const nextId = `${item.id}:${seasonNumber}:${episode.number}`;
+    if (nextId === item.playId) {
+      toggleEpisodes(false);
+      return;
+    }
+    if (video) saveProgress(item.playId ?? item.id, video.currentTime, Number.isFinite(video.duration) ? video.duration : current?.duration);
+
+    currentEpisode = { season: seasonNumber, number: episode.number };
+    item.playId = nextId;
+    item.title = `${seasonsTitle()} — S${seasonNumber}E${episode.number} · ${episode.name}`;
+    titleChip.querySelector('h2').textContent = item.title;
+    paintEpisodeButton();
+    toggleEpisodes(false);
+
+    detachFeeder(detachStream);
+    detachStream = null;
+    video = null;
+    iframe = null;
+    captionTracks = [];
+    activeCaption = null;
+    renderCaptionButton();
+    await startPlayback(nextId);
+  }
+
+  const seasonsTitle = () => String(item.title ?? '').split(' — ')[0];
 
   const showStatus = (title, message, spinning = true) => {
     stage.classList.add('is-idle');
@@ -675,6 +855,62 @@ export async function openPlayer(item) {
   };
 
   /**
+   * Caption sync.
+   *
+   * Cues are timed for one release and the copy being played may be another, so
+   * every cue can be nudged. `__baseStart`/`__baseEnd` keep the times the file
+   * shipped with — without them each nudge would stack on the last one and the
+   * track would drift away for good. The track loads asynchronously, so the
+   * shift runs again on `load`.
+   */
+  const shiftCues = (track) => {
+    const list = track?.cues;
+    if (!list) return;
+    for (const cue of list) {
+      if (cue.__baseStart === undefined) {
+        cue.__baseStart = cue.startTime;
+        cue.__baseEnd = cue.endTime;
+      }
+      const start = cue.__baseStart + captionOffset;
+      const end = cue.__baseEnd + captionOffset;
+      if (end <= 0.2) continue;
+      try {
+        cue.startTime = Math.max(0, start);
+        cue.endTime = Math.max(0.2, end);
+      } catch {
+        // the browser refused a re-timed cue; the file's own timing stays
+      }
+    }
+  };
+
+  const showingTrack = () => {
+    if (!video) return null;
+    const node = [...video.querySelectorAll('track')].find((entry) => entry.track?.mode === 'showing');
+    return node?.track ?? null;
+  };
+
+  /**
+   * Apply the sync shift as soon as a track's cues exist.
+   *
+   * `track.cues` is null until the VTT has parsed, and the `load` event that
+   * announces it fires on the element, not on the TextTrack — attaching to the
+   * wrong object meant a track turned on with a non-zero offset played the
+   * file's own timing for the rest of the episode. Both paths are wired, and a
+   * short poll covers a track that was already cached before the listener
+   * landed.
+   */
+  const shiftWhenReady = (node, attempt = 0) => {
+    if (!node) return;
+    const track = node.track;
+    if (track?.cues?.length) {
+      shiftCues(track);
+      return;
+    }
+    if (attempt >= 40) return;
+    setTimeout(() => shiftWhenReady(node, attempt + 1), 100);
+  };
+
+  /**
    * Turn one language on, or all of them off.
    *
    * A `<track>` is appended the first time a language is chosen and kept
@@ -701,6 +937,10 @@ export async function openPlayer(item) {
       for (const entry of video.querySelectorAll('track')) {
         entry.track.mode = entry === node ? 'showing' : 'disabled';
       }
+      // Cues parse asynchronously and the event fires on the element, so both
+      // the listener and a poll are wired — see `shiftWhenReady`.
+      node.addEventListener('load', () => shiftCues(node.track), { once: true });
+      shiftWhenReady(node);
     } else {
       for (const entry of video.querySelectorAll('track')) entry.track.mode = 'disabled';
     }
@@ -708,6 +948,13 @@ export async function openPlayer(item) {
     activeCaption = lang;
     renderCaptionButton();
     flashNote(lang ? `Subtitles: ${track.label}` : 'Subtitles off', 1800);
+  };
+
+  const applyCaptionOffset = (value) => {
+    captionOffset = Math.max(-30, Math.min(30, Math.round(Number(value) * 10) / 10));
+    setCaptionOffset(captionOffset);
+    shiftCues(showingTrack());
+    if (!captionMenu.hidden) openCaptions();
   };
 
   /**
@@ -735,6 +982,7 @@ export async function openPlayer(item) {
   const openCaptions = () => {
     if (!captionTracks.length) return;
     closeQuality();
+
     const row = (track) => {
       const active = (activeCaption ?? null) === (track?.lang ?? null);
       return el('button', {
@@ -748,6 +996,31 @@ export async function openPlayer(item) {
         active ? el('span', { class: 'tick', text: '✓' }) : null);
     };
 
+    // Twenty-seven languages on an episode is a wall of rows, so the list gets
+    // a filter as soon as it is longer than a glance.
+    const list = el('div', { class: 'caption-list' });
+    const paint = (query) => {
+      const needle = String(query ?? '').trim().toLowerCase();
+      const matches = needle
+        ? captionTracks.filter((entry) =>
+            String(entry.label ?? '').toLowerCase().includes(needle)
+            || String(entry.lang ?? '').toLowerCase().includes(needle))
+        : captionTracks;
+      list.replaceChildren(row(null), ...matches.map(row));
+      if (!matches.length) {
+        list.append(el('p', { class: 'caption-empty', text: 'No language matches that.' }));
+      }
+    };
+
+    const search = captionTracks.length > 8
+      ? el('input', {
+          class: 'caption-search', type: 'search', spellcheck: 'false',
+          placeholder: `Search ${captionTracks.length} languages`,
+          'aria-label': 'Filter subtitle languages',
+          on: { input: (event) => paint(event.target.value) },
+        })
+      : null;
+
     // Size sits above the languages and works whether a track is on or not, so
     // the choice can be made before the first line of dialogue.
     const sizeRow = el('div', { class: 'caption-size' },
@@ -760,13 +1033,29 @@ export async function openPlayer(item) {
           on: { click: () => applyCaptionSize(size) },
         }, el('span', { text: size[0].toUpperCase() + size.slice(1) })))));
 
+    const offsetValue = el('button', {
+      type: 'button', class: 'caption-offset-value',
+      'aria-label': 'Reset subtitle sync',
+      on: { click: () => applyCaptionOffset(0) },
+    }, el('span', { text: `${captionOffset > 0 ? '+' : ''}${captionOffset.toFixed(1)}s` }));
+
+    const offsetRow = el('div', { class: 'caption-size' },
+      el('span', { class: 'caption-size-label', text: 'Sync' }),
+      el('div', { class: 'caption-offset-group', role: 'group', 'aria-label': 'Subtitle sync' },
+        el('button', { type: 'button', on: { click: () => applyCaptionOffset(captionOffset - 0.5) } }, el('span', { text: '−0.5s' })),
+        offsetValue,
+        el('button', { type: 'button', on: { click: () => applyCaptionOffset(captionOffset + 0.5) } }, el('span', { text: '+0.5s' }))));
+
+    paint('');
     captionMenu.replaceChildren(
       el('h3', { text: `Subtitles · ${captionTracks.length} languages` }),
       sizeRow,
-      row(null),
-      ...captionTracks.map(row),
+      offsetRow,
+      search,
+      list,
     );
     captionMenu.hidden = false;
+    search?.focus();
   };
 
   /**
@@ -823,6 +1112,10 @@ export async function openPlayer(item) {
         toggleKeys(false);
         return;
       }
+      if (episodesPanel && !episodesPanel.hidden) {
+        toggleEpisodes(false);
+        return;
+      }
       if (!qualityMenu.hidden) {
         closeQuality();
         return;
@@ -846,12 +1139,10 @@ export async function openPlayer(item) {
       video.paused ? video.play().catch(() => {}) : video.pause();
     } else if (event.key === 'ArrowRight' || event.key.toLowerCase() === 'l') {
       event.preventDefault();
-      video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
-      flashNote('+10s', 1100);
+      seekToTime(video.currentTime + 10, '+10s');
     } else if (event.key === 'ArrowLeft' || event.key.toLowerCase() === 'j') {
       event.preventDefault();
-      video.currentTime = Math.max(0, video.currentTime - 10);
-      flashNote('-10s', 1100);
+      seekToTime(video.currentTime - 10, '-10s');
     } else if (event.key.toLowerCase() === 'm') {
       video.muted = !video.muted;
     } else if (event.key.toLowerCase() === 'c') {
@@ -940,16 +1231,19 @@ export async function openPlayer(item) {
     const pipButton = el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Picture in picture' }, icon('pip'));
     const fsButton = el('button', { class: 'ctrl', type: 'button', 'data-fs': '', 'aria-label': 'Fullscreen' }, icon('fullscreen'));
 
-    const seekTo = (clientX) => {
+    const scrubTo = (clientX) => {
       const rect = seek.getBoundingClientRect();
       const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-      if (Number.isFinite(video.duration)) video.currentTime = ratio * video.duration;
+      const total = Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : Number(current?.duration) > 0 ? Number(current.duration) : 0;
+      if (total > 0) seekToTime(ratio * total);
     };
 
     seek.addEventListener('pointerdown', (event) => {
       seek.setPointerCapture(event.pointerId);
-      seekTo(event.clientX);
-      const move = (moveEvent) => seekTo(moveEvent.clientX);
+      scrubTo(event.clientX);
+      const move = (moveEvent) => scrubTo(moveEvent.clientX);
       const up = () => {
         seek.removeEventListener('pointermove', move);
         seek.removeEventListener('pointerup', up);
@@ -969,8 +1263,7 @@ export async function openPlayer(item) {
     seek.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
       event.preventDefault();
-      const delta = event.key === 'ArrowRight' ? 10 : -10;
-      video.currentTime = Math.min(video.duration || Infinity, Math.max(0, video.currentTime + delta));
+      seekToTime(video.currentTime + (event.key === 'ArrowRight' ? 10 : -10));
     });
 
     volume.value = String(state.prefs.muted ? 0 : state.prefs.volume ?? 1);
@@ -1062,16 +1355,17 @@ export async function openPlayer(item) {
       el('div', { class: 'controls-row' },
         el('button', {
           class: 'ctrl', type: 'button', 'aria-label': 'Back 10 seconds',
-          on: { click: () => { video.currentTime = Math.max(0, video.currentTime - 10); } },
+          on: { click: () => seekToTime(video.currentTime - 10, '-10s') },
         }, icon('back10')),
         playButton,
         el('button', {
           class: 'ctrl', type: 'button', 'aria-label': 'Forward 10 seconds',
-          on: { click: () => { video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10); } },
+          on: { click: () => seekToTime(video.currentTime + 10, '+10s') },
         }, icon('fwd10')),
         el('div', { class: 'volume-wrap' }, muteButton, volume),
         speedButton,
         qualityButton,
+        episodesButton,
         captionSlot = el('span', { class: 'caption-slot' }),
         el('div', { class: 'ctrl-spacer' }),
         pipButton,
@@ -1270,39 +1564,50 @@ export async function openPlayer(item) {
 
   /* ------------------------------ boot -------------------------------- */
 
-  showStatus('Preparing stream', `Preparing “${item.title}”`);
-  headMeta.textContent = 'preparing…';
+  /**
+   * Ask the server for one playable source and mount it.
+   *
+   * Separate from the boot below because the episode drawer re-enters it: an
+   * episode switch is the same request with a different id, and the player
+   * stays open across it.
+   */
+  async function startPlayback(playId) {
+    showStatus('Preparing stream', `Preparing “${item.title}”`);
+    headMeta.textContent = 'preparing…';
 
-  // The server decides everything: a local copy, a live direct stream, or one
-  // embed. There is no source list in the player and nothing for the visitor
-  // to pick.
-  const playId = item.playId ?? item.id;
-  const payload = await getPlay(playId).catch((err) => ({ error: err }));
+    // The server decides everything: a local copy, a live direct stream, or one
+    // embed. There is no source list in the player and nothing for the visitor
+    // to pick.
+    const payload = await getPlay(playId).catch((err) => ({ error: err }));
+    if (closed) return;
 
-  if (payload.error) {
-    showStatus('Could not start playback', payload.error.message, false);
-    stage.append(el('button', {
-      class: 'btn btn-ghost btn-mini', type: 'button',
-      on: { click: () => { closePlayer(); openPlayer(item); } },
-    }, 'Retry'));
-    return;
+    if (payload.error) {
+      showStatus('Could not start playback', payload.error.message, false);
+      stage.append(el('button', {
+        class: 'btn btn-ghost btn-mini', type: 'button',
+        on: { click: () => { closePlayer(); openPlayer(item); } },
+      }, 'Retry'));
+      return;
+    }
+
+    const source = payload.source;
+    if (!source) {
+      showStatus('No stream yet', 'This title has no playable source right now.', false);
+      return;
+    }
+
+    // A browser without the right MSE codec cannot take the direct stream; drop
+    // to the embed before mounting instead of after a black frame.
+    if (source.session && !canPlaySession(source)) {
+      await fallbackToEmbed('This browser cannot decode the direct stream.');
+      return;
+    }
+
+    sources = [source];
+    mountSource(0);
   }
 
-  const source = payload.source;
-  if (!source) {
-    showStatus('No stream yet', 'This title has no playable source right now.', false);
-    return;
-  }
-
-  // A browser without the right MSE codec cannot take the direct stream; drop
-  // to the embed before mounting instead of after a black frame.
-  if (source.session && !canPlaySession(source)) {
-    await fallbackToEmbed('This browser cannot decode the direct stream.');
-    return;
-  }
-
-  sources = [source];
-  mountSource(0);
+  await startPlayback(item.playId ?? item.id);
 }
 
 /**
