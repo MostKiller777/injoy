@@ -19,6 +19,7 @@ const SAVE_INTERVAL = 5_000;
 
 const KEY_ROWS = [
   ['Space / K', 'Play or pause'],
+  ['E', 'Open episode seasons'],
   ['← / →', 'Seek 10 seconds'],
   ['J / L', 'Seek 10 seconds'],
   ['M', 'Mute'],
@@ -558,7 +559,7 @@ export async function openPlayer(item) {
 
   const paintEpisodeButton = () => {
     if (!episodesButton) return;
-    episodesButton.replaceChildren(icon('list'), el('span', { text: episodeLabel() }));
+    episodesButton.replaceChildren(icon('list'), el('span', { text: `Episodes · ${episodeLabel()}` }));
     episodesButton.setAttribute('aria-label', `Episodes — currently season ${currentEpisode?.season ?? 1} episode ${currentEpisode?.number ?? 1}`);
   };
 
@@ -1144,6 +1145,11 @@ export async function openPlayer(item) {
       toggleKeys();
       return;
     }
+    if (event.key.toLowerCase() === 'e' && episodesPanel) {
+      event.preventDefault();
+      toggleEpisodes();
+      return;
+    }
     if (!video) return;
     if (event.key === ' ' || event.key.toLowerCase() === 'k') {
       event.preventDefault();
@@ -1403,6 +1409,10 @@ export async function openPlayer(item) {
             },
           },
         }, el('span', { text: 'Reload' })),
+        // Direct playback can fall back to an iframe. Keep the season drawer
+        // available there too; otherwise a failed stream would strand a series
+        // on the episode that happened to start first.
+        episodesButton,
         el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Keyboard shortcuts', on: { click: () => toggleKeys(true) } }, icon('help')),
         el('div', { class: 'ctrl-spacer' }),
         el('button', { class: 'ctrl', type: 'button', 'data-fs': '', 'aria-label': 'Fullscreen', on: { click: toggleFullscreen } }, icon('fullscreen')),
