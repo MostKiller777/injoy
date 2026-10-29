@@ -3,6 +3,7 @@ import { imgProxy } from './images.js';
 import { EXTRA_FILMS } from './curated-extra.js';
 import { MORE_FILMS } from './curated-more.js';
 import { DEEP_FILMS } from './curated-200.js';
+import { NEW_FILMS } from './curated-new.js';
 
 /**
  * Hand-picked catalog for the titles people actually search for.
@@ -1386,14 +1387,14 @@ const BASE_FILMS = [
 ];
 
 /**
- * Three shelves, one catalog. Later shelves can repeat a title that an earlier
+ * Four shelves, one catalog. Later shelves can repeat a title that an earlier
  * shelf already ships (a favourite resurfacing in a different genre pass), so
  * the merge keeps the first record per TMDB id and drops the rest — otherwise
  * the grid shows the same film twice and the id map points at a stale object.
  */
 const FILMS = (() => {
   const seen = new Map();
-  for (const film of [...BASE_FILMS, ...EXTRA_FILMS, ...MORE_FILMS, ...DEEP_FILMS]) {
+  for (const film of [...BASE_FILMS, ...EXTRA_FILMS, ...MORE_FILMS, ...DEEP_FILMS, ...NEW_FILMS]) {
     const id = Number(film.tmdbId);
     if (!Number.isFinite(id) || seen.has(id)) continue;
     seen.set(id, film);

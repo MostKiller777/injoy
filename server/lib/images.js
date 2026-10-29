@@ -2,6 +2,8 @@ const ALLOWED = [
   /^(?:[a-z0-9-]+\.)*tmdb\.org$/i,
   /^(?:[a-z0-9-]+\.)*ltrbxd\.com$/i,
   /^(?:[a-z0-9-]+\.)*tvmaze\.com$/i,
+  // Cinemeta's art host: the newest shelf has no Letterboxd page yet.
+  /^(?:[a-z0-9-]+\.)*metahub\.space$/i,
   // Wikipedia's media host: the only place with art for the titles Letterboxd
   // has no backdrop for.
   /^(?:[a-z0-9-]+\.)*wikimedia\.org$/i,

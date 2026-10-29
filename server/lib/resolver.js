@@ -71,7 +71,7 @@ function pickCandidate(text) {
  * makes. Resolves to `{ url, type, referer }` or null when nothing surfaces
  * inside the timeout.
  */
-export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600, signal = null } = {}) {
+export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600, signal = null, windowSize = '1920,1080' } = {}) {
   const chrome = chromePath();
   if (!chrome) return { error: 'no chrome or edge binary found' };
   if (signal?.aborted) return { error: 'cancelled' };
@@ -89,7 +89,7 @@ export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600, s
     '--disable-background-networking',
     '--autoplay-policy=no-user-gesture-required',
     '--mute-audio',
-    '--window-size=1280,720',
+    `--window-size=${windowSize}`,
     `--user-data-dir=${profile}`,
     '--log-net-log=' + netlog,
     '--net-log-capture-mode=IncludeSensitive',

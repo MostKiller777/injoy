@@ -13,9 +13,10 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 ## What it does
 
 **Catalog**
-- Curated-only shelf (no key required): 500 hand-picked films across eight genre rails — Noir, Horror, Sci-Fi, Comedy, Drama, Western, Animation, Documentary — with real posters/backdrops. Search matches titles, directors, years and genres, and survives typos via a five-character prefix pass.
+- Curated-only shelf (no key required): 808 films across eight genre rails — Noir, Horror, Sci-Fi, Comedy, Drama, Western, Animation, Documentary — with real posters/backdrops. Search matches titles, directors, years and genres, and survives typos via a five-character prefix pass.
+- The newest shelf is the 300 most recent releases in the catalog (late 2025 through this month), frozen from Cinemeta's new-release feed into `server/lib/curated-new.js`. Nothing on it is announced-only: a film has to be out and rated 5.0+ to make the shelf.
 - Genre rails are built from the catalog's own genre tags: TMDB names for the seven real genres, plus a local `Noir` tag because TMDB has no noir genre.
-- Artwork comes from the TMDB image CDN for the first shelf, the Letterboxd CDN for the later ones, and the TVMaze CDN for series; all of it is served through the same `/api/img` proxy.
+- Artwork comes from the TMDB image CDN for the first shelf, the Letterboxd CDN for the middle ones, the Metahub CDN for the newest shelf, and the TVMaze CDN for series; all of it is served through the same `/api/img` proxy.
 - Adult and exploitation titles are excluded from the catalog.
 - TMDB integration (optional): with a key, detail pages resolve live metadata, cast, crew and trailers for the same ids.
 
@@ -36,6 +37,9 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - A seek outside the buffered window tears the MediaSource down and builds a new one at the target rather than appending across the gap. Chrome rejects a large PTS jump mid-parse with `CHUNK_DEMUXER_ERROR_APPEND_FAILED`, which latches the element's `error` and kills the stream for the rest of the session; a remount costs one buffer rebuild and always works. Remounts are debounced 200 ms so dragging the scrubber does not thrash the demuxer.
 - Progressive files go through a same-origin proxy with Range pass-through, because the CDN wants a Referer the browser cannot set and sends no CORS header.
 - If a direct stream fails or the browser cannot decode it, the player falls back to the first embed on its own. No dead ends, no source list. That frame is deliberately **not** sandboxed: providers refuse to start their player inside a sandbox, and a frame that will not play is worse than one that can open a popup.
+- **Captions.** Neither provider ships a text track — the DASH manifests carry video and audio only, the HLS playlists have no `EXT-X-MEDIA` — so subtitles come from the OpenSubtitles index behind Stremio's keyless addon. Every language the film or episode has is listed in the player: the CC pill opens a menu of all of them, one click turns one on and the rest off, and `C` toggles captions. A series episode typically carries 27–29 languages, a film around 10.
+- Captions are converted to WebVTT on the server (`server/lib/subtitles.js`) and served same-origin from `/api/subs/<id>/<lang>.vtt`; the browser never reaches the subtitle CDN, and a converted track is cached on disk after the first request. SubRip is what the index hands over, and a browser will not play `.srt` through a `<track>`.
+- Caption size is a three-way control in the same menu — **Small**, **Middle**, **Big** — applied through `::cue` so it multiplies the browser's own cue size and keeps tracking the frame at any window size. The choice is stored with the volume and survives reloads.
 - Player chrome: glass head with title and year, centre play button when paused, buffering spinner on stall, single-click play/pause, double-click fullscreen, and a `?` keyboard panel.
 - Progress is written on pause, on close, and on tab hide. Resume is offered automatically past the 20-second mark.
 
@@ -127,19 +131,54 @@ PORT=6967 HOST=0.0.0.0 DATA_DIR=/var/lib/injoy node server/index.js
 
 Put nginx or Caddy in front for TLS. There is no auth layer — the watchlist and progress endpoints are open, so a public deployment is a public deployment.
 
-**Instant public URL, no account**
+**Instant public URL, no account — `publish\start.ps1`**
 
 ```powershell
-.\scripts\tunnel.ps1
+powershell -ExecutionPolicy Bypass -File publish\start.ps1
 ```
 
-It fetches `cloudflared` once, starts the server if it is not already up, and prints a `https://<words>.trycloudflare.com` URL. The URL is ephemeral: it lives as long as that window stays open and changes on the next run. Good for showing the site to someone; not a deployment.
+It fetches `cloudflared` once into `publish\bin\`, starts `node server/index.js` if nothing is answering on the port, opens a quick tunnel, waits for the hostname, and prints it:
+
+```
+  injoy is live at  https://<words>.trycloudflare.com
+```
+
+The URL is also written to `data/public-url.txt`. `-NoTunnel` starts only the server, `-Port` changes the port, `-Stop` shuts both down. Cloudflare's quick tunnel needs no account, no card and no quota, and the app talks to `127.0.0.1` — the tunnel is the only thing exposed.
+
+**Keep it up forever — `publish\autostart.ps1`**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File publish\autostart.ps1
+powershell -ExecutionPolicy Bypass -File publish\autostart.ps1 -Remove
+```
+
+Registers a per-user scheduled task that runs `start.ps1` at every logon, restarts it three times at five-minute intervals if it dies, and never asks for elevation. That is the whole "free forever" story: the server and the downloaded library stay on this machine, so there is no storage bill, no egress bill and no sleeping free tier — only the tunnel, which is free at any volume.
+
+**A permanent hostname**
+
+A quick tunnel gets a new random hostname each restart. Two free ways to pin one:
+
+```powershell
+# 1. Named tunnel — free Cloudflare account plus a domain you already own.
+cloudflared tunnel login
+cloudflared tunnel create injoy
+cloudflared tunnel route dns injoy injoy.example.com
+cloudflared tunnel run --url http://127.0.0.1:6967 injoy
+```
+
+```powershell
+# 2. Tailscale Funnel — free account, no domain, stable <machine>.<tailnet>.ts.net
+tailscale funnel 6967
+```
+
+Point `start.ps1` at whichever one you settle on (drop the quick-tunnel block and run the named tunnel instead), and `autostart.ps1` keeps it alive across reboots.
 
 **Notes on hosting**
 
 - Direct playback and background caching need Chrome or Edge for the resolver. The Docker image ships neither, so `/api/play/:id` answers with an embed there and nothing is cached. Downloads with an explicit `url` work everywhere — HLS, progressive and DASH segment saving are pure Node.
 - The catalog is static files inside the image, so the free tiers of any host serve it fine; only the disk and the resolver care about the plan.
 - Cold starts on scale-to-zero hosts cost one Node boot (~200 ms) plus the first rail's cache fill.
+- Serving from this machine means visitor bandwidth comes out of your upload. One viewer at 720p is ~3 Mbit/s; the resolver and the cache job already yield to live playback.
 
 ---
 
@@ -156,6 +195,8 @@ injoy/
       curated-extra.js  second shelf — noir, western, documentary, horror, comedy, animation
       curated-more.js   third shelf — the wide genre fill
       curated-200.js    fourth shelf — deep cuts, title + exact year validated
+      curated-new.js    fifth shelf — the 300 newest releases, from Cinemeta
+      subtitles.js      caption index, SubRip → WebVTT, language names, caches
       series.js         series normalize, detail, episode sources, search
       series-data.js    frozen TVMaze metadata + full episode lists
       downloader.js     HLS/progressive engine, job map, ordered segment writes
@@ -175,9 +216,17 @@ injoy/
     sw.js               shell cache
     manifest.webmanifest
     icon.svg
+  publish/
+    start.ps1           serve + publish on a free quick tunnel, print the URL
+    autostart.ps1       per-user scheduled task: publish at every logon
+    bin/cloudflared.exe fetched on first run
+  scripts/
+    tunnel.ps1          thin forwarder to publish/start.ps1
   data/library.json     library state, created on first write
   data/media.json       downloaded media index, created on first download
   data/media/           downloaded files
+  data/subs/            converted WebVTT tracks + imdb id map
+  data/public-url.txt   last published URL, written by publish/start.ps1
   .env.example
 ```
 
@@ -208,7 +257,9 @@ injoy/
 | POST | `/api/download/:id` | `{ url, referer }` downloads a known URL; no body resolves and caches |
 | DELETE | `/api/download/:id` | cancel the job and delete the file |
 | GET | `/api/random` | surprise pick |
-| GET | `/api/img?u=` | image proxy, allowlisted to tmdb.org, ltrbxd.com, tvmaze.com |
+| GET | `/api/subs/:id` | every caption language for a title: `[{ lang, code, label, url }]` |
+| GET | `/api/subs/:id/:lang.vtt` | one track as WebVTT, converted once and cached on disk |
+| GET | `/api/img?u=` | image proxy, allowlisted to tmdb.org, ltrbxd.com, tvmaze.com, metahub.space, wikimedia.org |
 | GET | `/api/watchlist` | saved items |
 | POST | `/api/watchlist` | `{ item }` upsert |
 | DELETE | `/api/watchlist/:id` | remove |
