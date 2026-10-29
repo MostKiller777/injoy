@@ -89,6 +89,9 @@ export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600, s
     '--disable-background-networking',
     '--autoplay-policy=no-user-gesture-required',
     '--mute-audio',
+    // A service account on a locked-down Linux host cannot start Chrome's
+    // sandbox; the deploy unit sets this and the browser still sniffs fine.
+    ...(process.env.CHROME_NO_SANDBOX === '1' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
     `--window-size=${windowSize}`,
     `--user-data-dir=${profile}`,
     '--log-net-log=' + netlog,

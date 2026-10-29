@@ -152,7 +152,17 @@ powershell -ExecutionPolicy Bypass -File publish\autostart.ps1
 powershell -ExecutionPolicy Bypass -File publish\autostart.ps1 -Remove
 ```
 
-Registers a per-user scheduled task that runs `start.ps1` at every logon, restarts it three times at five-minute intervals if it dies, and never asks for elevation. That is the whole "free forever" story: the server and the downloaded library stay on this machine, so there is no storage bill, no egress bill and no sleeping free tier — only the tunnel, which is free at any volume.
+Registers a per-user scheduled task that runs `start.ps1` at every logon, restarts it three times at five-minute intervals if it dies, and never asks for elevation. A second task, `injoy-watch`, runs `publish\watchdog.ps1` every ten minutes: Cloudflare can reclaim a quick tunnel at any moment ("Tunnel not found") and a reclaimed tunnel never re-registers itself, so the watchdog tests the published URL and rebuilds the tunnel when it is dead. That is the whole "free forever" story while the machine is on: the server and the downloaded library stay here, so there is no storage bill, no egress bill and no sleeping free tier — only the tunnel, which is free at any volume.
+
+**Running with this machine switched off**
+
+The tunnel publishes *this* PC. For a site that answers while the PC is off, put the same app on an always-on free VM — Oracle Cloud's Always Free tier gives 4 cores, 24 GB RAM, 200 GB of disk and 10 TB of egress a month, permanently, at no cost:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\push.ps1 -Server <public-ip> -Key <path-to-key>
+```
+
+That packs the app, copies it over SSH and provisions the host: Node 22, headless Chrome for the resolver, an `injoy` systemd service on port 80 with `Restart=always`, data in `/var/lib/injoy`. Reboot the VM and it comes back by itself; re-run the command to deploy an update without touching the library. Full walkthrough, the security-list rule, TLS with a domain, and the alternatives table are in [`deploy/README.md`](deploy/README.md).
 
 **A permanent hostname**
 
@@ -218,8 +228,13 @@ injoy/
     icon.svg
   publish/
     start.ps1           serve + publish on a free quick tunnel, print the URL
-    autostart.ps1       per-user scheduled task: publish at every logon
+    autostart.ps1       per-user scheduled tasks: publish at logon, watchdog every 10 min
+    watchdog.ps1        rebuild the tunnel when the published URL dies
     bin/cloudflared.exe fetched on first run
+  deploy/
+    bootstrap.sh        provision an always-on Ubuntu host: node, chrome, systemd
+    push.ps1            pack this checkout, scp it, run bootstrap over ssh
+    README.md           the free-forever host walkthrough
   scripts/
     tunnel.ps1          thin forwarder to publish/start.ps1
   data/library.json     library state, created on first write
