@@ -163,12 +163,21 @@ export function seriesStreamTarget(id) {
   if (kind !== 'tv' || !raw) return null;
   const show = BY_TVMAZE.get(raw);
   if (!show) return null;
+  const seasonNumber = Number(season) || 1;
+  const episodeNumber = Number(episode) || 1;
+  const episodeData = show.seasons
+    .find((entry) => entry.number === seasonNumber)
+    ?.episodes.find((entry) => entry.number === episodeNumber);
   return {
     imdbId: show.imdbId ?? null,
     tmdbId: tmdbForImdb(show.imdbId),
-    season: Number(season) || 1,
-    episode: Number(episode) || 1,
+    season: seasonNumber,
+    episode: episodeNumber,
     title: show.title,
+    // The frozen source stores episode runtime in minutes. This is a hint for
+    // subtitle matching; the player passes the exact stream duration whenever
+    // the selected source exposes one.
+    duration: episodeData?.runtime ? episodeData.runtime * 60 : null,
   };
 }
 

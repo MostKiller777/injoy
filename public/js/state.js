@@ -39,7 +39,7 @@ export const state = {
   watchlist: new Map(),
   progress: {},
   recent: [],
-  prefs: { muted: false, volume: 1, captionSize: 'middle' },
+  prefs: { muted: false, volume: 1, captionSize: 'middle', captionOffset: 0, captionOffsets: {} },
   ready: false,
 };
 
@@ -265,9 +265,34 @@ export function setCaptionSize(size) {
  * and applied by shifting every cue of the showing track.
  */
 export function setCaptionOffset(offset) {
+  return setCaptionOffsetFor(null, offset);
+}
+
+/** Return the saved sync for one title/language, falling back to old global data. */
+export function captionOffsetFor(key) {
+  const stored = key ? state.prefs.captionOffsets?.[key] : undefined;
+  return Number.isFinite(Number(stored))
+    ? Number(stored)
+    : Number(state.prefs.captionOffset) || 0;
+}
+
+/**
+ * Store sync per title and language.
+ *
+ * A single global offset made one badly timed episode poison every other title.
+ * The old `captionOffset` remains as the migration fallback; new adjustments
+ * live under `<play id>:<language>` instead.
+ */
+export function setCaptionOffsetFor(key, offset) {
   const value = Number(offset);
-  state.prefs.captionOffset = Number.isFinite(value) ? Math.max(-30, Math.min(30, Math.round(value * 10) / 10)) : 0;
+  const normalized = Number.isFinite(value) ? Math.max(-30, Math.min(30, Math.round(value * 10) / 10)) : 0;
+  if (key) {
+    state.prefs.captionOffsets = { ...(state.prefs.captionOffsets ?? {}), [key]: normalized };
+  } else {
+    state.prefs.captionOffset = normalized;
+  }
   persistPrefs();
+  return normalized;
 }
 
 export function continueCount() {

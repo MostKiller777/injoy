@@ -124,7 +124,7 @@ function baseIdFor(id) {
  * Films carry neither, so the subtitles module matches one from the title and
  * year and keeps the answer.
  */
-async function captionTarget(id) {
+async function captionTarget(id, duration = null) {
   const [kind] = String(id).split(':');
   if (kind === 'tv') {
     const target = seriesStreamTarget(id);
@@ -136,6 +136,7 @@ async function captionTarget(id) {
       imdbId: target.imdbId,
       season: target.season,
       episode: target.episode,
+      duration: Number.isFinite(duration) && duration > 0 ? duration : target.duration,
     };
   }
   const meta = await catalog.detail(id).catch(() => null);
@@ -146,6 +147,7 @@ async function captionTarget(id) {
     imdbId: null,
     season: null,
     episode: null,
+    duration: Number.isFinite(duration) && duration > 0 ? duration : Number(meta?.runtime) || null,
   };
 }
 
@@ -631,9 +633,11 @@ async function handleApi(req, res, url) {
   if (subsVttMatch && method === 'GET') {
     const id = decodeURIComponent(subsVttMatch[1]);
     const lang = subsVttMatch[2].toLowerCase();
-    const target = await captionTarget(id);
+    const variant = searchParams.get('v');
+    const requestedDuration = Number(searchParams.get('d'));
+    const target = await captionTarget(id, Number.isFinite(requestedDuration) ? requestedDuration : null);
     if (!target) return fail(res, 404, 'no captions for this title');
-    const track = await subtitleVtt({ ...target, lang });
+    const track = await subtitleVtt({ ...target, lang, variant });
     if (!track.ok) return fail(res, track.status ?? 502, track.error);
     res.writeHead(200, {
       'content-type': 'text/vtt; charset=utf-8',
@@ -646,7 +650,8 @@ async function handleApi(req, res, url) {
   const subsMatch = /^\/api\/subs\/(.+)$/.exec(pathname);
   if (subsMatch && method === 'GET') {
     const id = decodeURIComponent(subsMatch[1]);
-    const target = await captionTarget(id);
+    const requestedDuration = Number(searchParams.get('d'));
+    const target = await captionTarget(id, Number.isFinite(requestedDuration) ? requestedDuration : null);
     if (!target) return json(res, 200, { id, imdbId: null, tracks: [] });
     const list = await subtitleTracks(target);
     return json(res, 200, { id, imdbId: list.imdbId ?? null, tracks: list.tracks ?? [] });

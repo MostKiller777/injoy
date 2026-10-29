@@ -136,6 +136,7 @@ async function lookupImdb(title, year) {
 /* -------------------------------- listing -------------------------------- */
 
 const trackCache = new Map();
+const CACHE_VERSION = 'v3';
 
 async function fetchJson(url) {
   const res = await fetch(url, {
@@ -147,14 +148,67 @@ async function fetchJson(url) {
 }
 
 /**
- * Every language the index has for this title, one track each.
+ * How good a candidate is likely to be, before anyone has watched it.
  *
- * Returns `{ ok, imdbId, tracks: [{ lang, code, label, url }] }`. `url` is a
- * same-origin WebVTT endpoint — the browser never reaches the subtitle CDN, and
- * the SubRip → WebVTT conversion stays on this side.
+ * The index lists every upload for a language, and they are not equivalent:
+ * a release-group file timed to the retail Blu-ray is not the same as a cam
+ * rip's, a split-CD file starts its clock twice, and a legacy code page loses
+ * accented characters. Ranking happens on the server so the player gets the
+ * best track by default instead of whichever one the index happened to return
+ * first.
  */
-export async function subtitleTracks({ id, title, year, imdbId = null, season = null, episode = null }) {
-  const cached = trackCache.get(id);
+function scoreCandidate(entry) {
+  const encoding = String(entry.SubEncoding ?? '').toUpperCase();
+  const release = String(entry.movieReleaseName ?? '');
+  const file = String(entry.subtitleFileName ?? '');
+  const name = `${release} ${file}`;
+  const fps = Number(entry.fpsMilli) || 0;
+
+  let score = 0;
+  if (encoding === 'UTF-8') score += 400;
+  else if (encoding === 'ASCII') score += 320;
+  else score += 160;
+  score += Math.min(140, Number(entry.g) || 0);
+  // A declared frame rate means the uploader timed it to a specific master, so
+  // the cues were placed against a real reference instead of eyeballed.
+  if (fps) score += 70;
+  if (/bluray|blu-ray|bdrip|web-?dl|webrip|remux/i.test(name)) score += 35;
+  // Two-part rips carry a second clock for the second half. They desync by
+  // minutes on a single-file copy, which no amount of nudging repairs.
+  if (/\bcd\s?[12]\b|part\.?\s?[12]\b|disc\s?[12]\b/i.test(name)) score -= 90;
+  if (/\bcam\b|\bhd-?cam\b|\bts\b|telesync|screener|\bscr\b/i.test(name)) score -= 60;
+  if (Number(entry.season) > 0 || Number(entry.episode) > 0) score += 20;
+  return score;
+}
+
+const cleanRelease = (entry) => String(entry.movieReleaseName ?? '').trim()
+  || String(entry.subtitleFileName ?? '').replace(/\.[a-z0-9]{2,4}$/i, '').trim()
+  || null;
+
+const variantUrl = (id, lang, candidateId, duration = null) => {
+  const params = new URLSearchParams();
+  if (candidateId) params.set('v', candidateId);
+  if (Number.isFinite(duration) && duration > 0) params.set('d', String(Math.round(duration)));
+  const query = params.toString();
+  return `/api/subs/${encodeURIComponent(id)}/${encodeURIComponent(lang)}.vtt${query ? `?${query}` : ''}`;
+};
+
+/**
+ * Every language the index has for this title.
+ *
+ * Each language keeps its ranked candidates, not just the winner: the player
+ * lists them so a copy that disagrees with the top pick can be swapped for a
+ * release that matches. `url` is a same-origin WebVTT endpoint — the browser
+ * never reaches the subtitle CDN, and the SubRip → WebVTT conversion stays on
+ * this side.
+ *
+ * Returns `{ ok, imdbId, tracks: [{ lang, code, label, url, release, fps,
+ * downloads, variants: [...] }] }`.
+ */
+export async function subtitleTracks({ id, title, year, imdbId = null, season = null, episode = null, duration = null }) {
+  const durationKey = Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 'auto';
+  const cacheKey = `${id}:${durationKey}`;
+  const cached = trackCache.get(cacheKey);
   if (cached && Date.now() - cached.at < TRACK_TTL) return cached.value;
 
   let imdb = imdbId;
@@ -169,7 +223,7 @@ export async function subtitleTracks({ id, title, year, imdbId = null, season = 
   }
   if (!imdb) {
     const value = { ok: true, imdbId: null, tracks: [] };
-    trackCache.set(id, { at: Date.now(), value });
+    trackCache.set(cacheKey, { at: Date.now(), value });
     return value;
   }
 
@@ -189,64 +243,267 @@ export async function subtitleTracks({ id, title, year, imdbId = null, season = 
   for (const entry of raw) {
     const lang = String(entry.lang ?? '').toLowerCase();
     if (!lang || !entry.url) continue;
-    const score = (entry.SubEncoding === 'UTF-8' ? 1000 : 0)
-      + (Number(entry.g) || 0)
-      + (/bluray|web-?dl|webrip/i.test(entry.releaseFormat ?? '') ? 40 : 0);
+    const scored = { score: scoreCandidate(entry), entry, lang };
     const held = byLang.get(lang);
-    if (!held || score > held.score) {
-      byLang.set(lang, { score, entry, lang });
-    }
+    if (!held) byLang.set(lang, [scored]);
+    else held.push(scored);
   }
 
-  const tracks = [...byLang.values()]
-    .map(({ entry, lang }) => ({
-      lang,
-      code: ALPHA3[lang] ?? (lang.length === 2 ? lang : lang.slice(0, 2)),
-      label: languageName(lang),
-      url: `/api/subs/${encodeURIComponent(id)}/${encodeURIComponent(lang)}.vtt`,
-      source: entry.url,
-    }))
+  const tracks = [...byLang.entries()]
+    .map(([lang, list]) => {
+      list.sort((a, b) => b.score - a.score || (Number(b.entry.g) || 0) - (Number(a.entry.g) || 0));
+      const variants = list.slice(0, 4).map(({ entry, score }, index) => ({
+        id: String(entry.id ?? index),
+        url: variantUrl(id, lang, index === 0 ? null : String(entry.id ?? index), duration),
+        release: cleanRelease(entry),
+        fps: Number(entry.fpsMilli) ? Number(entry.fpsMilli) / 1000 : null,
+        downloads: Number(entry.g) || 0,
+        score,
+        source: entry.url,
+      }));
+      const best = variants[0];
+      return {
+        lang,
+        code: ALPHA3[lang] ?? (lang.length === 2 ? lang : lang.slice(0, 2)),
+        label: languageName(lang),
+        url: best.url,
+        source: best.source,
+        release: best.release,
+        fps: best.fps,
+        downloads: best.downloads,
+        variants,
+      };
+    })
     .sort((a, b) => a.label.localeCompare(b.label));
 
   const value = { ok: true, imdbId: imdb, tracks };
-  trackCache.set(id, { at: Date.now(), value });
+  trackCache.set(cacheKey, { at: Date.now(), value });
   return value;
 }
 
 /* ------------------------------- conversion ------------------------------- */
 
-const timestamp = /\b(\d{1,2}:\d{2}:\d{2}),(\d{1,3})\b/g;
+const TIMING_LINE = /(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})/;
+
+function timestampSeconds(stamp) {
+  const normalized = String(stamp).replace(',', '.');
+  const parts = normalized.split(':');
+  if (parts.length === 2) {
+    const [minutes, seconds] = parts.map(Number);
+    return minutes * 60 + seconds;
+  }
+  if (parts.length === 3) {
+    const [hours, minutes, seconds] = parts.map(Number);
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+  return NaN;
+}
+
+const secondsToStamp = (value) => {
+  const milliseconds = Math.max(0, Math.round(Number(value) * 1000));
+  const h = Math.floor(milliseconds / 3_600_000);
+  const m = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const s = Math.floor((milliseconds % 60_000) / 1000);
+  const ms = milliseconds % 1000;
+  const pad = (n, width = 2) => String(n).padStart(width, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}.${pad(ms, 3)}`;
+};
 
 /**
- * SubRip → WebVTT.
+ * Cue text a browser will actually render.
  *
- * Three differences matter and nothing else does: a `WEBVTT` header, a dot
- * instead of a comma in every timestamp, and no bare index lines. The rest of
- * the file is already valid cue text, so it is passed through untouched apart
- * from the ASS positioning overrides and font tags a browser will not render.
+ * SubRip files carry ASS override blocks (`{\an8}`, `{\i1}`, `{\pos(..)}`) and
+ * font tags. WebVTT understands `<i>`, `<b>` and `<u>` and nothing else, so the
+ * override blocks are removed outright and the font tags are unwrapped — the
+ * words stay, the styling does not.
  */
-export function srtToVtt(input) {
-  const text = String(input)
-    .replace(/^\uFEFF/, '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/\{\\an?\d+\}/gi, '')
+function cleanCueText(text) {
+  return text
+    .replace(/\{[^}]*\}/g, '')
     .replace(/<\/?font[^>]*>/gi, '')
+    .replace(/\\N/gi, '\n')
     .replace(/\\h/g, ' ')
-    .replace(timestamp, (_, time, ms) => `${time}.${ms.padEnd(3, '0')}`);
+    .split('\n')
+    .map((line) => line.replace(/\s+$/g, '').replace(/^[ \t]+/g, ''))
+    .filter((line) => line.length)
+    .join('\n')
+    .trim();
+}
 
+/**
+ * Parse SubRip into timed cues.
+ *
+ * Blocks are split on blank lines, and a block's timings are the first line that
+ * matches the `start --> end` shape — index lines, stray blanks and missing
+ * separators are all tolerated, because a real index is full of files that are
+ * *almost* valid.
+ */
+export function parseSrt(input) {
+  const text = String(input).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   const lines = text.split('\n');
-  const out = [];
+  const cues = [];
+  let current = null;
+
+  const flush = () => {
+    if (!current) return;
+    const body = cleanCueText(current.lines.join('\n'));
+    if (body && current.end > current.start) {
+      cues.push({ start: current.start, end: current.end, text: body });
+    }
+    current = null;
+  };
+
   for (const line of lines) {
-    // A cue index is a lone number on its own line. WebVTT would read it as a
-    // cue identifier, which is legal but confuses nothing; dropping it keeps
-    // the file tidy and avoids a stray digit rendering when a blank line is
-    // missing between cues.
-    if (/^\s*\d+\s*$/.test(line)) continue;
-    out.push(line);
+    const match = TIMING_LINE.exec(line);
+    if (match) {
+      flush();
+      current = {
+        start: timestampSeconds(match[1]),
+        end: timestampSeconds(match[2]),
+        lines: [],
+      };
+      continue;
+    }
+    if (!current) continue;
+    if (!line.trim()) {
+      flush();
+      continue;
+    }
+    // SRT indexes are not cue text. A malformed file can put one immediately
+    // before a timing line; ignore it without requiring blank separators.
+    if (!current.lines.length && /^\s*\d+\s*$/.test(line)) continue;
+    current.lines.push(line);
+  }
+  flush();
+  return cues;
+}
+
+/** WebVTT uses the same arrow but also permits mm:ss.mmm timestamps. */
+export function parseVtt(input) {
+  const text = String(input).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const lines = text.split('\n');
+  const cues = [];
+  let current = null;
+  let ignoredBlock = false;
+
+  const flush = () => {
+    if (!current) return;
+    const body = cleanCueText(current.lines.join('\n'));
+    if (body && current.end > current.start) {
+      cues.push({ start: current.start, end: current.end, text: body });
+    }
+    current = null;
+  };
+
+  for (const line of lines) {
+    if (/^(NOTE|STYLE|REGION)(?:\s|$)/i.test(line)) {
+      flush();
+      ignoredBlock = true;
+      continue;
+    }
+    if (ignoredBlock) {
+      if (!line.trim()) ignoredBlock = false;
+      continue;
+    }
+    const match = TIMING_LINE.exec(line);
+    if (match) {
+      flush();
+      current = {
+        start: timestampSeconds(match[1]),
+        end: timestampSeconds(match[2]),
+        lines: [],
+      };
+      continue;
+    }
+    if (!current) continue;
+    if (!line.trim()) {
+      flush();
+      continue;
+    }
+    current.lines.push(line);
+  }
+  flush();
+  return cues;
+}
+
+/**
+ * Timing repair, applied to every track before it is served.
+ *
+ * Real subtitle files overlap, flash, and repeat. A cue that starts before the
+ * previous one ends renders two lines on top of each other; a cue under half a
+ * second is gone before the eye lands on it; a duplicated cue flickers. None of
+ * that is the viewer's problem to fix, and none of it is fixable by nudging the
+ * whole track — so it is fixed once, here.
+ *
+ * Rules, in order:
+ *  - sorted by start time, then by end time
+ *  - cues under 120 ms or empty are dropped
+ *  - consecutive cues with identical text closer than 150 ms apart are merged
+ *  - an overlap longer than 60 ms trims the earlier cue, never the later one
+ *  - a cue shorter than 800 ms grows into the gap before the next one, capped
+ *    at 5 s so a stray one-word line does not sit on screen for minutes
+ */
+export function normalizeCues(input) {
+  const cues = input
+    .filter((cue) => cue.text && cue.end - cue.start > 0.12)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+
+  const merged = [];
+  for (const cue of cues) {
+    const previous = merged[merged.length - 1];
+    if (previous && previous.text === cue.text && cue.start - previous.end < 0.15) {
+      previous.end = Math.max(previous.end, cue.end);
+      continue;
+    }
+    merged.push({ ...cue });
   }
 
-  const body = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  for (let i = 0; i < merged.length; i += 1) {
+    const cue = merged[i];
+    const next = merged[i + 1];
+    if (next && cue.end - next.start > 0.06) {
+      cue.end = Math.max(cue.start + 0.4, next.start - 0.02);
+    }
+    if (cue.end - cue.start < 0.8) {
+      const ceiling = next ? next.start - 0.02 : cue.start + 5;
+      cue.end = Math.min(cue.start + 5, Math.max(cue.end, Math.min(ceiling, cue.start + 0.8)));
+    }
+  }
+
+  return merged.filter((cue) => cue.end > cue.start);
+}
+
+/** Cues → WebVTT. */
+export function cuesToVtt(cues) {
+  const body = cues
+    .map((cue) => `${secondsToStamp(cue.start)} --> ${secondsToStamp(cue.end)}\n${cue.text}`)
+    .join('\n\n');
   return `WEBVTT\n\n${body}\n`;
+}
+
+function normalizeCaptionBody(raw) {
+  const text = String(raw).replace(/^\uFEFF/, '');
+  const parsed = /^\s*WEBVTT(?:\s|$)/i.test(text)
+    ? parseVtt(text)
+    : parseSrt(text);
+  const cues = normalizeCues(parsed);
+  return {
+    body: cuesToVtt(cues),
+    cues,
+    first: cues[0]?.start ?? null,
+    last: cues.at(-1)?.end ?? null,
+  };
+}
+
+/**
+ * SubRip → WebVTT, with the timing repaired on the way through.
+ *
+ * Kept as a single exported entry point because every caption path funnels
+ * through it: index files are SubRip, and a browser will not play `.srt`
+ * through a `<track>`.
+ */
+export function srtToVtt(input) {
+  return normalizeCaptionBody(input).body;
 }
 
 /** Decode a subtitle file: the addon usually hands over UTF-8, sometimes not. */
@@ -256,41 +513,73 @@ function decode(buffer) {
   return buffer.toString('latin1');
 }
 
+const sanitizeLang = (lang) => String(lang).replace(/[^a-z0-9-]/gi, '');
+const sanitizeVariant = (variant) => String(variant ?? '').replace(/[^a-zA-Z0-9._-]+/g, '').slice(0, 40);
+
+async function fetchSubtitle(url) {
+  const res = await fetch(url, {
+    headers: { 'user-agent': UA },
+    signal: AbortSignal.timeout(FILE_TIMEOUT),
+  });
+  if (!res.ok) throw Object.assign(new Error(`subtitle file answered ${res.status}`), { status: 502 });
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (!buffer.length) throw Object.assign(new Error('subtitle file is empty'), { status: 502 });
+  if (buffer.length > MAX_BYTES) throw Object.assign(new Error('subtitle file is implausibly large'), { status: 502 });
+  return normalizeCaptionBody(decode(buffer));
+}
+
+/**
+ * Pick the upload whose final dialogue is closest to the actual media clock.
+ *
+ * Subtitle files usually stop before the final credits, so comparing the last
+ * cue with the absolute end would punish the right file. A 2.5% trailing
+ * margin, capped at three minutes, is a stable estimate across films and
+ * episodes. The player supplies the exact stream duration; catalog runtime is
+ * only the fallback hint.
+ */
+function timingDistance(lastCue, duration) {
+  if (!Number.isFinite(lastCue) || !(duration > 0)) return Infinity;
+  const tail = Math.min(180, Math.max(20, duration * 0.025));
+  return Math.abs(lastCue - (duration - tail));
+}
+
 /**
  * One track as WebVTT, converted once and kept on disk.
  *
- * The list is re-read from the index so a stale `source` URL is not reused
- * after the process restarts; the converted file is the cache that matters.
+ * `variant` names a specific upload for the language; without one the ranked
+ * best is used. The list is re-read from the index so a stale `source` URL is
+ * not reused after the process restarts; the converted file is the cache that
+ * matters.
  */
-export async function subtitleVtt({ id, lang, title, year, imdbId = null, season = null, episode = null }) {
-  const file = join(titleDir(id), `${String(lang).replace(/[^a-z0-9-]/gi, '')}.vtt`);
+export async function subtitleVtt({ id, lang, title, year, imdbId = null, season = null, episode = null, duration = null, variant = null }) {
+  const durationKey = Number.isFinite(duration) && duration > 0 ? `d${Math.round(duration)}` : 'auto';
+  const suffix = variant ? `__${sanitizeVariant(variant)}` : '';
+  const file = join(titleDir(id), `${sanitizeLang(lang)}.${CACHE_VERSION}.${durationKey}${suffix}.vtt`);
   try {
     return { ok: true, body: await readFile(file, 'utf8') };
   } catch {
     // not converted yet
   }
 
-  const list = await subtitleTracks({ id, title, year, imdbId, season, episode });
+  const list = await subtitleTracks({ id, title, year, imdbId, season, episode, duration });
   const track = list.tracks.find((entry) => entry.lang === lang);
   if (!track) return { ok: false, status: 404, error: 'no such language' };
 
-  let res;
-  try {
-    res = await fetch(track.source, {
-      headers: { 'user-agent': UA },
-      signal: AbortSignal.timeout(FILE_TIMEOUT),
-    });
-  } catch (err) {
-    return { ok: false, status: 502, error: err.message };
-  }
-  if (!res.ok) return { ok: false, status: 502, error: `subtitle file answered ${res.status}` };
+  const candidates = variant
+    ? [(track.variants ?? []).find((entry) => entry.id === String(variant))].filter(Boolean)
+    : (track.variants?.length ? track.variants : [track]);
+  const loaded = (await Promise.allSettled(candidates.map(async (candidate) => ({
+    candidate,
+    converted: await fetchSubtitle(candidate.source),
+  })))).flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+  if (!loaded.length) return { ok: false, status: 502, error: 'all subtitle files failed to download' };
 
-  const buffer = Buffer.from(await res.arrayBuffer());
-  if (!buffer.length) return { ok: false, status: 502, error: 'subtitle file is empty' };
-  if (buffer.length > MAX_BYTES) return { ok: false, status: 502, error: 'subtitle file is implausibly large' };
-
-  const raw = decode(buffer);
-  const body = /^WEBVTT/.test(raw.trimStart()) ? raw : srtToVtt(raw);
+  loaded.sort((a, b) => {
+    const byTiming = timingDistance(a.converted.last, duration) - timingDistance(b.converted.last, duration);
+    return byTiming || b.candidate.score - a.candidate.score;
+  });
+  const winner = loaded[0].converted;
+  const body = winner.body;
 
   try {
     await mkdir(titleDir(id), { recursive: true });

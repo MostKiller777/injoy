@@ -3,10 +3,11 @@ import { createDashFeeder } from './dash.js';
 import { createHlsFeeder } from './hls.js';
 import {
   CAPTION_SIZES,
+  captionOffsetFor,
   progressFor,
   rememberShown,
   saveProgress,
-  setCaptionOffset,
+  setCaptionOffsetFor,
   setCaptionSize,
   setVolume,
   state,
@@ -889,6 +890,8 @@ export async function openPlayer(item) {
     return node?.track ?? null;
   };
 
+  const captionKey = (lang) => `${item.playId ?? item.id}:${lang}`;
+
   /**
    * Apply the sync shift as soon as a track's cues exist.
    *
@@ -923,6 +926,9 @@ export async function openPlayer(item) {
     const lang = track?.lang ?? null;
 
     if (lang) {
+      // Timing corrections belong to this title and language. Switching from
+      // one episode or language must never carry the previous track's offset.
+      captionOffset = captionOffsetFor(captionKey(lang));
       let node = [...video.querySelectorAll('track')].find((entry) => entry.dataset.lang === lang);
       if (!node) {
         node = el('track', {
@@ -952,7 +958,7 @@ export async function openPlayer(item) {
 
   const applyCaptionOffset = (value) => {
     captionOffset = Math.max(-30, Math.min(30, Math.round(Number(value) * 10) / 10));
-    setCaptionOffset(captionOffset);
+    setCaptionOffsetFor(activeCaption ? captionKey(activeCaption) : null, captionOffset);
     shiftCues(showingTrack());
     if (!captionMenu.hidden) openCaptions();
   };
@@ -1033,18 +1039,23 @@ export async function openPlayer(item) {
           on: { click: () => applyCaptionSize(size) },
         }, el('span', { text: size[0].toUpperCase() + size.slice(1) })))));
 
+    const offsetText = captionOffset === 0
+      ? 'Auto'
+      : `${captionOffset > 0 ? '+' : ''}${captionOffset.toFixed(1)}s`;
     const offsetValue = el('button', {
       type: 'button', class: 'caption-offset-value',
-      'aria-label': 'Reset subtitle sync',
+      'aria-label': 'Reset subtitle timing to automatic',
       on: { click: () => applyCaptionOffset(0) },
-    }, el('span', { text: `${captionOffset > 0 ? '+' : ''}${captionOffset.toFixed(1)}s` }));
+    }, el('span', { text: offsetText }));
 
-    const offsetRow = el('div', { class: 'caption-size' },
-      el('span', { class: 'caption-size-label', text: 'Sync' }),
+    const offsetRow = el('div', { class: 'caption-size caption-sync-row' },
+      el('span', { class: 'caption-size-label', text: 'Sync · 0.1s' }),
       el('div', { class: 'caption-offset-group', role: 'group', 'aria-label': 'Subtitle sync' },
-        el('button', { type: 'button', on: { click: () => applyCaptionOffset(captionOffset - 0.5) } }, el('span', { text: '−0.5s' })),
+        el('button', { type: 'button', 'aria-label': 'Move captions 0.5 seconds earlier', on: { click: () => applyCaptionOffset(captionOffset - 0.5) } }, el('span', { text: '−0.5s' })),
+        el('button', { type: 'button', 'aria-label': 'Move captions 0.1 seconds earlier', on: { click: () => applyCaptionOffset(captionOffset - 0.1) } }, el('span', { text: '−0.1s' })),
         offsetValue,
-        el('button', { type: 'button', on: { click: () => applyCaptionOffset(captionOffset + 0.5) } }, el('span', { text: '+0.5s' }))));
+        el('button', { type: 'button', 'aria-label': 'Move captions 0.1 seconds later', on: { click: () => applyCaptionOffset(captionOffset + 0.1) } }, el('span', { text: '+0.1s' })),
+        el('button', { type: 'button', 'aria-label': 'Move captions 0.5 seconds later', on: { click: () => applyCaptionOffset(captionOffset + 0.5) } }, el('span', { text: '+0.5s' }))));
 
     paint('');
     captionMenu.replaceChildren(
@@ -1062,14 +1073,14 @@ export async function openPlayer(item) {
    * Ask for the list. A stale answer is dropped: the player may have moved to
    * another title, or to an embed that cannot carry a text track at all.
    */
-  const loadCaptions = async (id) => {
+  const loadCaptions = async (id, duration = null) => {
     const token = ++captionToken;
     captionTracks = [];
     activeCaption = null;
     renderCaptionButton();
     if (!id) return;
 
-    const data = await getSubtitles(id).catch(() => null);
+    const data = await getSubtitles(id, duration).catch(() => null);
     if (closed || token !== captionToken) return;
 
     captionTracks = Array.isArray(data?.tracks) ? data.tracks : [];
@@ -1430,7 +1441,10 @@ export async function openPlayer(item) {
     // Captions belong to the title, not the mount: fetch once, keep the list
     // for the whole session so a quality switch or an embed fallback does not
     // have to ask again.
-    if (!captionTracks.length) void loadCaptions(item.playId ?? item.id);
+    if (!captionTracks.length) {
+      const subtitleDuration = Number(source.duration ?? source.session?.duration ?? 0);
+      void loadCaptions(item.playId ?? item.id, subtitleDuration);
+    }
     else renderCaptionButton();
     player.classList.remove('is-hidden-chrome');
     headMeta.textContent = source.kind !== 'direct'

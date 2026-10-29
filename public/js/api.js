@@ -79,8 +79,10 @@ export const getPlay = (id, signal) => api(`/api/play/${encodeURIComponent(id)}`
 export const getRandom = () => api('/api/random');
 
 // Captions for one title: every language the index has, as WebVTT endpoints.
-export const getSubtitles = (id) =>
-  api(`/api/subs/${encodeURIComponent(id)}`, { timeout: 20_000, retries: 0 });
+export const getSubtitles = (id, duration = null) => {
+  const query = Number.isFinite(duration) && duration > 0 ? `?d=${encodeURIComponent(Math.round(duration))}` : '';
+  return api(`/api/subs/${encodeURIComponent(id)}${query}`, { timeout: 20_000, retries: 0 });
+};
 
 // Re-open a live stream on another rendition; the reply is a fresh session.
 export const getHlsVariant = (sid, index) =>

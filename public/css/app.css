@@ -1292,9 +1292,11 @@ button { cursor: pointer; border: 0; background: none; }
    track back on the file's own timing, which is the escape hatch after a
    handful of half-second corrections. */
 .caption-offset-group { display: flex; gap: 4px; margin-left: auto; align-items: center; }
+.caption-sync-row { align-items: flex-start; }
 .source-menu .caption-offset-group button {
   width: auto;
-  padding: 6px 9px;
+  min-width: 0;
+  padding: 6px 7px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.04);
