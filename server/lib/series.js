@@ -14,27 +14,47 @@ const TITLE_FIX = {
   Cosmos: 'Cosmos: A Spacetime Odyssey',
 };
 
+/**
+ * Episode embeds.
+ *
+ * These used to be IMDb-query URLs (`vidsrc.to/embed/tv?imdb=...`). VidSrc
+ * stopped answering that shape and redirects it to its own marketing homepage,
+ * which is exactly what a visitor saw: a "Next generation Video Streaming API"
+ * page instead of an episode. The path form with a numeric TMDB id is the one
+ * still served, and VidLink is the provider that also powers the direct
+ * resolver, so it opens first.
+ */
 const EPISODE_PROVIDERS = [
+  {
+    id: 'vidlink',
+    label: 'VidLink',
+    url: ({ tmdbId, imdbId, season, episode }) => `https://vidlink.pro/tv/${tmdbId ?? imdbId}/${season}/${episode}`,
+  },
+  {
+    id: 'vidsrc.pm',
+    label: 'VidSrc PM',
+    url: ({ tmdbId, season, episode }) => (tmdbId ? `https://vidsrc.pm/embed/tv/${tmdbId}/${season}/${episode}` : null),
+  },
   {
     id: 'vidsrc.to',
     label: 'VidSrc',
-    url: (imdb, season, episode) => `https://vidsrc.to/embed/tv?imdb=${imdb}&season=${season}&episode=${episode}`,
+    url: ({ tmdbId, season, episode }) => (tmdbId ? `https://vidsrc.to/embed/tv/${tmdbId}/${season}/${episode}` : null),
   },
   {
     id: 'vidsrc.xyz',
     label: 'VidSrc XYZ',
-    url: (imdb, season, episode) => `https://vidsrc.xyz/embed/tv?imdb=${imdb}&season=${season}&episode=${episode}`,
+    url: ({ tmdbId, imdbId, season, episode }) => `https://vidsrc.xyz/embed/tv?tmdb=${tmdbId ?? imdbId}&season=${season}&episode=${episode}`,
   },
   {
     id: '2embed',
     label: '2Embed',
-    url: (imdb, season, episode) => `https://www.2embed.cc/embedtv/${imdb}&s=${season}&e=${episode}`,
+    url: ({ imdbId, season, episode }) => `https://www.2embed.cc/embedtv/${imdbId}&s=${season}&e=${episode}`,
     ads: true,
   },
   {
     id: 'superembed',
     label: 'SuperEmbed',
-    url: (imdb, season, episode) => `https://multiembed.mov/directstream.php?video_id=${imdb}&tmdb=0&s=${season}&e=${episode}`,
+    url: ({ imdbId, season, episode }) => `https://multiembed.mov/directstream.php?video_id=${imdbId}&tmdb=0&s=${season}&e=${episode}`,
     ads: true,
   },
 ];
@@ -45,15 +65,20 @@ const totalEpisodes = (show) => show.seasons.reduce((sum, season) => sum + seaso
 
 export function episodeSources(show, season = 1, episode = 1) {
   if (!show?.imdbId) return [];
+  const tmdbId = tmdbForImdb(show.imdbId);
+  const ids = { imdbId: show.imdbId, tmdbId, season, episode };
   // Ad-heavy hosts go last so the episode opens on a clean player first.
   const ordered = [...EPISODE_PROVIDERS].sort((a, b) => Number(a.ads ?? false) - Number(b.ads ?? false));
-  return ordered.map((provider) => ({
-    provider: provider.id,
-    label: provider.ads ? `${provider.label} · ads` : provider.label,
-    kind: 'embed',
-    quality: 'auto',
-    url: provider.url(show.imdbId, season, episode),
-  }));
+  return ordered
+    .map((provider) => ({ provider, url: provider.url(ids) }))
+    .filter((entry) => entry.url)
+    .map(({ provider, url }) => ({
+      provider: provider.id,
+      label: provider.ads ? `${provider.label} · ads` : provider.label,
+      kind: 'embed',
+      quality: 'auto',
+      url,
+    }));
 }
 
 function normalize(show) {

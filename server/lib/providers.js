@@ -5,15 +5,21 @@
  */
 export const EMBED_PROVIDERS = [
   {
-    id: 'vidsrc.to',
-    label: 'VidSrc',
-    url: (id) => `https://vidsrc.to/embed/movie/${id}`,
-    quality: 'auto',
-  },
-  {
     id: 'vidlink',
     label: 'VidLink',
     url: (id) => `https://vidlink.pro/movie/${id}`,
+    quality: 'auto',
+  },
+  {
+    id: 'vidsrc.pm',
+    label: 'VidSrc PM',
+    url: (id) => `https://vidsrc.pm/embed/movie/${id}`,
+    quality: 'auto',
+  },
+  {
+    id: 'vidsrc.to',
+    label: 'VidSrc',
+    url: (id) => `https://vidsrc.to/embed/movie/${id}`,
     quality: 'auto',
   },
   {
