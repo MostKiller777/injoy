@@ -56,6 +56,7 @@ const ICONS = {
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.5 2.5 0 1 1 3.7 2.2c-.7.4-1.3 1-1.3 1.8M12 17h.01"/>',
   external: '<path d="M14 4h6v6"/><path d="m20 4-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
   ticket: '<path d="M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4z"/>',
+  cc: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M11 10.4a2.2 2.2 0 1 0 0 3.2"/><path d="M17 10.4a2.2 2.2 0 1 0 0 3.2"/>',
   download: '<path d="M12 4v11"/><path d="m7 12 5 5 5-5"/><path d="M5 20h14"/>',
 };
 

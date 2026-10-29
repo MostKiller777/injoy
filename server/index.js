@@ -20,6 +20,7 @@ import { resolveStream } from './lib/resolver.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
 import { hlsSession, readLocalHlsSegment } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
+import { subtitleTracks, subtitleVtt } from './lib/subtitles.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 loadEnv(join(ROOT, '.env'));
@@ -114,6 +115,38 @@ function streamTarget(id, meta = null) {
 function baseIdFor(id) {
   const parts = String(id).split(':');
   return parts[0] === 'tv' ? parts.slice(0, 2).join(':') : String(id);
+}
+
+/**
+ * Where a title's captions live.
+ *
+ * Series carry an IMDb id in the frozen map and their episode coordinates.
+ * Films carry neither, so the subtitles module matches one from the title and
+ * year and keeps the answer.
+ */
+async function captionTarget(id) {
+  const [kind] = String(id).split(':');
+  if (kind === 'tv') {
+    const target = seriesStreamTarget(id);
+    if (!target?.imdbId) return null;
+    return {
+      id,
+      title: target.title ?? null,
+      year: null,
+      imdbId: target.imdbId,
+      season: target.season,
+      episode: target.episode,
+    };
+  }
+  const meta = await catalog.detail(id).catch(() => null);
+  return {
+    id,
+    title: meta?.title ?? null,
+    year: meta?.year ?? null,
+    imdbId: null,
+    season: null,
+    episode: null,
+  };
 }
 
 // Background caching is a courtesy, not a promise: one at a time, and only
@@ -591,6 +624,32 @@ async function handleApi(req, res, url) {
     const fallback = (data?.sources ?? []).find((source) => source.kind === 'embed');
     if (!fallback) return fail(res, 502, found.error ?? 'no source available');
     return json(res, 200, { id, mode: 'embed', source: fallback });
+  }
+
+  // captions: one WebVTT track per language, converted from SubRip on this side
+  const subsVttMatch = /^\/api\/subs\/(.+?)\/([a-z0-9-]+)\.vtt$/i.exec(pathname);
+  if (subsVttMatch && method === 'GET') {
+    const id = decodeURIComponent(subsVttMatch[1]);
+    const lang = subsVttMatch[2].toLowerCase();
+    const target = await captionTarget(id);
+    if (!target) return fail(res, 404, 'no captions for this title');
+    const track = await subtitleVtt({ ...target, lang });
+    if (!track.ok) return fail(res, track.status ?? 502, track.error);
+    res.writeHead(200, {
+      'content-type': 'text/vtt; charset=utf-8',
+      'cache-control': 'public, max-age=86400',
+    });
+    return res.end(track.body);
+  }
+
+  // the language list the player's caption menu is built from
+  const subsMatch = /^\/api\/subs\/(.+)$/.exec(pathname);
+  if (subsMatch && method === 'GET') {
+    const id = decodeURIComponent(subsMatch[1]);
+    const target = await captionTarget(id);
+    if (!target) return json(res, 200, { id, imdbId: null, tracks: [] });
+    const list = await subtitleTracks(target);
+    return json(res, 200, { id, imdbId: list.imdbId ?? null, tracks: list.tracks ?? [] });
   }
 
   // a live HLS session re-opened on another rendition, for the quality menu

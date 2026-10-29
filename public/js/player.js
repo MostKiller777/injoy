@@ -1,10 +1,12 @@
-import { getDashVariant, getHlsVariant, getPlay, getSources } from './api.js';
+import { getDashVariant, getHlsVariant, getPlay, getSources, getSubtitles } from './api.js';
 import { createDashFeeder } from './dash.js';
 import { createHlsFeeder } from './hls.js';
 import {
+  CAPTION_SIZES,
   progressFor,
   rememberShown,
   saveProgress,
+  setCaptionSize,
   setVolume,
   state,
 } from './state.js';
@@ -18,6 +20,7 @@ const KEY_ROWS = [
   ['← / →', 'Seek 10 seconds'],
   ['J / L', 'Seek 10 seconds'],
   ['M', 'Mute'],
+  ['C', 'Subtitles on or off'],
   ['F', 'Fullscreen'],
   ['? / H', 'Shortcuts panel'],
   ['Esc', 'Close the player'],
@@ -420,6 +423,12 @@ export async function openPlayer(item) {
   };
   let qualityMenu = null;
   let qualityText = null;
+  let captionMenu = null;
+  let captionSlot = null;
+  let captionTracks = [];
+  let activeCaption = null;
+  let captionSize = CAPTION_SIZES.includes(state.prefs.captionSize) ? state.prefs.captionSize : 'middle';
+  let captionToken = 0;
   const listeners = [];
 
   const on = (target, event, handler, options) => {
@@ -622,6 +631,162 @@ export async function openPlayer(item) {
     apply(next, next.quality ?? label);
   };
 
+  /* ------------------------------ captions ------------------------------ */
+
+  /**
+   * Captions.
+   *
+   * The stream carries none — no text adaptation set in DASH, no `EXT-X-MEDIA`
+   * in HLS — so the list comes from the subtitle index and every track is
+   * converted to WebVTT on the server. The menu is built the moment the list
+   * lands, which is usually well before the first frame: the caption request
+   * runs alongside the play request rather than after it.
+   */
+  captionMenu = el('div', {
+    class: 'source-menu caption-menu', role: 'dialog', 'aria-label': 'Subtitles', hidden: true,
+  });
+  player.append(captionMenu);
+
+  const closeCaptions = () => { captionMenu.hidden = true; };
+
+  const activeLabel = () => {
+    if (!activeCaption) return 'Off';
+    return captionTracks.find((entry) => entry.lang === activeCaption)?.label ?? activeCaption;
+  };
+
+  const renderCaptionButton = () => {
+    if (!captionSlot) return;
+    if (!captionTracks.length) {
+      captionSlot.replaceChildren();
+      return;
+    }
+    captionSlot.replaceChildren(el('button', {
+      class: activeCaption ? 'pill-select is-on' : 'pill-select',
+      type: 'button', 'aria-label': 'Subtitles',
+      on: {
+        click: () => {
+          if (captionMenu.hidden) openCaptions();
+          else closeCaptions();
+        },
+      },
+    },
+      icon('cc'),
+      el('span', { text: activeCaption ? activeCaption.toUpperCase() : 'CC' })));
+  };
+
+  /**
+   * Turn one language on, or all of them off.
+   *
+   * A `<track>` is appended the first time a language is chosen and kept
+   * afterwards, so switching back is a mode flip rather than a refetch. The
+   * element is `disabled` for every other track — two showing at once stacks
+   * two sets of cues on the same frame.
+   */
+  const applyCaption = (track) => {
+    if (!video) return;
+    const lang = track?.lang ?? null;
+
+    if (lang) {
+      let node = [...video.querySelectorAll('track')].find((entry) => entry.dataset.lang === lang);
+      if (!node) {
+        node = el('track', {
+          kind: 'subtitles',
+          label: track.label,
+          srclang: track.code || 'en',
+          src: track.url,
+          dataset: { lang },
+        });
+        video.append(node);
+      }
+      for (const entry of video.querySelectorAll('track')) {
+        entry.track.mode = entry === node ? 'showing' : 'disabled';
+      }
+    } else {
+      for (const entry of video.querySelectorAll('track')) entry.track.mode = 'disabled';
+    }
+
+    activeCaption = lang;
+    renderCaptionButton();
+    flashNote(lang ? `Subtitles: ${track.label}` : 'Subtitles off', 1800);
+  };
+
+  /**
+   * Caption size.
+   *
+   * The cue lives in the video's shadow tree, so the only handle the page has on
+   * it is the `::cue` pseudo-element. The size lands as an attribute on the
+   * player root and the stylesheet carries one rule per size, each expressed in
+   * `em` — that multiplies the browser's own cue size instead of replacing it,
+   * so the text keeps its relationship to the frame at any window size.
+   */
+  const paintCaptionSize = () => {
+    player.dataset.cue = captionSize;
+  };
+
+  const applyCaptionSize = (size) => {
+    captionSize = CAPTION_SIZES.includes(size) ? size : 'middle';
+    paintCaptionSize();
+    setCaptionSize(captionSize);
+    if (!captionMenu.hidden) openCaptions();
+  };
+
+  paintCaptionSize();
+
+  const openCaptions = () => {
+    if (!captionTracks.length) return;
+    closeQuality();
+    const row = (track) => {
+      const active = (activeCaption ?? null) === (track?.lang ?? null);
+      return el('button', {
+        type: 'button',
+        class: active ? 'is-active' : '',
+        on: { click: () => { closeCaptions(); applyCaption(track); } },
+      },
+        el('div', { class: 'quality-item' },
+          el('span', { text: track ? track.label : 'Off' }),
+          track ? el('small', { text: track.lang.toUpperCase() }) : null),
+        active ? el('span', { class: 'tick', text: '✓' }) : null);
+    };
+
+    // Size sits above the languages and works whether a track is on or not, so
+    // the choice can be made before the first line of dialogue.
+    const sizeRow = el('div', { class: 'caption-size' },
+      el('span', { class: 'caption-size-label', text: 'Size' }),
+      el('div', { class: 'caption-size-group', role: 'group', 'aria-label': 'Subtitle size' },
+        ...CAPTION_SIZES.map((size) => el('button', {
+          type: 'button',
+          class: size === captionSize ? 'is-active' : '',
+          'aria-pressed': size === captionSize ? 'true' : 'false',
+          on: { click: () => applyCaptionSize(size) },
+        }, el('span', { text: size[0].toUpperCase() + size.slice(1) })))));
+
+    captionMenu.replaceChildren(
+      el('h3', { text: `Subtitles · ${captionTracks.length} languages` }),
+      sizeRow,
+      row(null),
+      ...captionTracks.map(row),
+    );
+    captionMenu.hidden = false;
+  };
+
+  /**
+   * Ask for the list. A stale answer is dropped: the player may have moved to
+   * another title, or to an embed that cannot carry a text track at all.
+   */
+  const loadCaptions = async (id) => {
+    const token = ++captionToken;
+    captionTracks = [];
+    activeCaption = null;
+    renderCaptionButton();
+    if (!id) return;
+
+    const data = await getSubtitles(id).catch(() => null);
+    if (closed || token !== captionToken) return;
+
+    captionTracks = Array.isArray(data?.tracks) ? data.tracks : [];
+    renderCaptionButton();
+  };
+
   const persist = () => {
     if (!video || !item.id) return;
     if (!Number.isFinite(video.currentTime) || video.currentTime < 5) return;
@@ -662,6 +827,10 @@ export async function openPlayer(item) {
         closeQuality();
         return;
       }
+      if (!captionMenu.hidden) {
+        closeCaptions();
+        return;
+      }
       closePlayer();
       return;
     }
@@ -685,6 +854,11 @@ export async function openPlayer(item) {
       flashNote('-10s', 1100);
     } else if (event.key.toLowerCase() === 'm') {
       video.muted = !video.muted;
+    } else if (event.key.toLowerCase() === 'c') {
+      event.preventDefault();
+      if (!captionTracks.length) return;
+      if (activeCaption) applyCaption(null);
+      else applyCaption(captionTracks[0]);
     } else if (event.key.toLowerCase() === 'f') {
       toggleFullscreen();
     }
@@ -898,6 +1072,7 @@ export async function openPlayer(item) {
         el('div', { class: 'volume-wrap' }, muteButton, volume),
         speedButton,
         qualityButton,
+        captionSlot = el('span', { class: 'caption-slot' }),
         el('div', { class: 'ctrl-spacer' }),
         pipButton,
         el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Keyboard shortcuts', on: { click: () => toggleKeys(true) } }, icon('help')),
@@ -958,6 +1133,11 @@ export async function openPlayer(item) {
     if (source.session?.renditions?.length) current = { ...source, renditions: source.session.renditions };
     stage.replaceChildren();
     controls.replaceChildren();
+    // Captions belong to the title, not the mount: fetch once, keep the list
+    // for the whole session so a quality switch or an embed fallback does not
+    // have to ask again.
+    if (!captionTracks.length) void loadCaptions(item.playId ?? item.id);
+    else renderCaptionButton();
     player.classList.remove('is-hidden-chrome');
     headMeta.textContent = source.kind !== 'direct'
       ? 'Third-party source'
@@ -1026,9 +1206,6 @@ export async function openPlayer(item) {
           type: isTransportStream ? 'video/mp2t' : 'video/mp4',
         });
         video.append(source0);
-      }
-      for (const [i, track] of (source.subtitles ?? []).entries()) {
-        video.append(el('track', { kind: 'subtitles', label: track.label, src: track.url, srclang: 'en', default: i === 0 ? '' : null }));
       }
 
       const loader = el('div', { class: 'player-status' },

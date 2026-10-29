@@ -39,7 +39,7 @@ export const state = {
   watchlist: new Map(),
   progress: {},
   recent: [],
-  prefs: { muted: false, volume: 1 },
+  prefs: { muted: false, volume: 1, captionSize: 'middle' },
   ready: false,
 };
 
@@ -246,6 +246,14 @@ export function clearProgress(id) {
 export function setVolume(volume, muted) {
   state.prefs.volume = Math.min(1, Math.max(0, volume));
   state.prefs.muted = Boolean(muted);
+  persistPrefs();
+}
+
+/** Caption text size, one of `small`, `middle`, `big`. Kept with the volume. */
+export const CAPTION_SIZES = ['small', 'middle', 'big'];
+
+export function setCaptionSize(size) {
+  state.prefs.captionSize = CAPTION_SIZES.includes(size) ? size : 'middle';
   persistPrefs();
 }
 

@@ -1234,6 +1234,61 @@ button { cursor: pointer; border: 0; background: none; }
 .source-menu .quality-item { display: flex; flex-direction: column; gap: 2px; }
 .source-menu .quality-item span { font-size: 13px; font-weight: 650; }
 
+/* Caption list: a series can carry thirty languages, so it scrolls rather than
+   running off the top of the frame. */
+.caption-menu {
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.caption-slot { display: contents; }
+
+/* Caption text size. The size lands on the player root as `data-cue`; each rule
+   multiplies the browser's own cue font size rather than replacing it, so the
+   text keeps its relationship to the frame at every window size. */
+.player[data-cue='small'] video::cue { font-size: 0.78em; }
+.player[data-cue='middle'] video::cue { font-size: 1em; }
+.player[data-cue='big'] video::cue { font-size: 1.45em; }
+.player video::cue { line-height: 1.32; }
+
+.caption-size {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.caption-size-label {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  font-weight: 700;
+  padding-left: 4px;
+}
+.caption-size-group { display: flex; gap: 4px; margin-left: auto; }
+.source-menu .caption-size-group button {
+  width: auto;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-dim);
+}
+.source-menu .caption-size-group button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--ink);
+}
+.source-menu .caption-size-group button.is-active {
+  border-color: var(--acc-2);
+  background: rgba(255, 138, 61, 0.18);
+  color: #ffc9a8;
+}
+.pill-select.is-on { border-color: var(--acc-2); color: #ffc9a8; background: rgba(255, 138, 61, 0.16); }
+
 .player-keys {
   position: absolute;
   inset: 0;
