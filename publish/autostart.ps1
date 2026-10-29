@@ -17,6 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $start = Join-Path $PSScriptRoot 'start.ps1'
+$silent = Join-Path $PSScriptRoot 'silent.vbs'
 
 if ($Remove) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -26,9 +27,13 @@ if ($Remove) {
 }
 
 if (-not (Test-Path $start)) { throw "missing $start" }
+if (-not (Test-Path $silent)) { throw "missing $silent" }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$start`"" `
+# WScript launches PowerShell with no console window. `powershell.exe
+# -WindowStyle Hidden` still flashes a window on several Windows builds, which
+# is what kept popping over the desktop every ten minutes.
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' `
+  -Argument "`"$silent`" `"$start`"" `
   -WorkingDirectory $root
 
 # A bare username is rejected by the task scheduler; it wants DOMAIN\user.
@@ -55,8 +60,8 @@ Write-Host "registered '$TaskName' - injoy starts at every logon" -ForegroundCol
 # A quick tunnel can be reclaimed at any moment and never re-registers itself,
 # so a second task pokes the published URL every ten minutes and rebuilds it.
 $watch = Join-Path $PSScriptRoot 'watchdog.ps1'
-$watchAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watch`"" `
+$watchAction = New-ScheduledTaskAction -Execute 'wscript.exe' `
+  -Argument "`"$silent`" `"$watch`"" `
   -WorkingDirectory $root
 $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
   -RepetitionInterval (New-TimeSpan -Minutes 10) `
