@@ -13,7 +13,17 @@ export class ApiError extends Error {
  * Every caller gets an AbortController-managed request so a fast route change
  * cannot land a stale render on top of a fresh one.
  */
-export async function api(path, { method = 'GET', body, timeout = 15_000, retries = 1, signal } = {}) {
+// A list response is stable for a minute and the same page asks for it again
+// on every home/search/genre hop. Keeping the parsed value removes the round
+// trip entirely without making the catalogue stale for long.
+const memo = new Map();
+const MEMO_TTL = 60_000;
+
+export async function api(path, { method = 'GET', body, timeout = 15_000, retries = 1, signal, cacheable = false } = {}) {
+  if (cacheable && method === 'GET') {
+    const hit = memo.get(path);
+    if (hit && Date.now() - hit.at < MEMO_TTL) return hit.value;
+  }
   let lastError;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -37,7 +47,12 @@ export async function api(path, { method = 'GET', body, timeout = 15_000, retrie
         if (res.status < 500 && res.status !== 429) throw err;
         lastError = err;
       } else {
-        return await res.json();
+        const value = await res.json();
+        if (cacheable && method === 'GET') {
+          if (memo.size > 40) memo.clear();
+          memo.set(path, { at: Date.now(), value });
+        }
+        return value;
       }
     } catch (err) {
       if (err instanceof ApiError && err.status < 500 && err.status !== 429) throw err;
@@ -54,12 +69,13 @@ export async function api(path, { method = 'GET', body, timeout = 15_000, retrie
   throw lastError ?? new Error('network failure');
 }
 
-export const getHome = (signal) => api('/api/home', { signal });
-export const getSearch = (q, page = 1, signal) => api(`/api/search?q=${encodeURIComponent(q)}&page=${page}`, { signal });
+export const getHome = (signal) => api('/api/home', { signal, cacheable: true });
+export const getSearch = (q, page = 1, signal) =>
+  api(`/api/search?q=${encodeURIComponent(q)}&page=${page}`, { signal, cacheable: true });
 export const getBrowse = ({ page = 1, genre = '', sort = 'popular' } = {}, signal) =>
-  api(`/api/browse?page=${page}&genre=${encodeURIComponent(genre)}&sort=${encodeURIComponent(sort)}`, { signal });
-export const getGenres = () => api('/api/genres');
-export const getSeries = (signal) => api('/api/series', { signal });
+  api(`/api/browse?page=${page}&genre=${encodeURIComponent(genre)}&sort=${encodeURIComponent(sort)}`, { signal, cacheable: true });
+export const getGenres = () => api('/api/genres', { cacheable: true });
+export const getSeries = (signal) => api('/api/series', { signal, cacheable: true });
 
 export const getLocal = (signal) => api('/api/local', { signal });
 export const getDownload = (id, signal) => api(`/api/download/${encodeURIComponent(id)}`, { signal });
@@ -79,9 +95,12 @@ export const getPlay = (id, signal) => api(`/api/play/${encodeURIComponent(id)}`
 export const getRandom = () => api('/api/random');
 
 // Captions for one title: every language the index has, as WebVTT endpoints.
-export const getSubtitles = (id, duration = null) => {
-  const query = Number.isFinite(duration) && duration > 0 ? `?d=${encodeURIComponent(Math.round(duration))}` : '';
-  return api(`/api/subs/${encodeURIComponent(id)}${query}`, { timeout: 20_000, retries: 0 });
+export const getSubtitles = (id, duration = null, fps = null) => {
+  const params = new URLSearchParams();
+  if (Number.isFinite(duration) && duration > 0) params.set('d', String(Math.round(duration)));
+  if (Number.isFinite(fps) && fps > 0) params.set('f', String(fps));
+  const query = params.toString();
+  return api(`/api/subs/${encodeURIComponent(id)}${query ? `?${query}` : ''}`, { timeout: 20_000, retries: 0 });
 };
 
 // Re-open a live stream on another rendition; the reply is a fresh session.

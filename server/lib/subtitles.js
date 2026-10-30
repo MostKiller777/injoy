@@ -136,7 +136,7 @@ async function lookupImdb(title, year) {
 /* -------------------------------- listing -------------------------------- */
 
 const trackCache = new Map();
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v4';
 
 async function fetchJson(url) {
   const res = await fetch(url, {
@@ -157,12 +157,23 @@ async function fetchJson(url) {
  * best track by default instead of whichever one the index happened to return
  * first.
  */
-function scoreCandidate(entry) {
+/** Pull `S07E02` or `7x02` out of a release name; the index mislabels these. */
+function episodeFromName(name) {
+  const text = String(name ?? '');
+  let match = /\bS(\d{1,2})[\s._-]?E(\d{1,3})\b/i.exec(text);
+  if (match) return { season: Number(match[1]), episode: Number(match[2]) };
+  match = /\b(\d{1,2})x(\d{1,3})\b/i.exec(text);
+  if (match) return { season: Number(match[1]), episode: Number(match[2]) };
+  return null;
+}
+
+function scoreCandidate(entry, videoFps = null, target = {}) {
   const encoding = String(entry.SubEncoding ?? '').toUpperCase();
   const release = String(entry.movieReleaseName ?? '');
   const file = String(entry.subtitleFileName ?? '');
   const name = `${release} ${file}`;
   const fps = Number(entry.fpsMilli) || 0;
+  const declared = fps / 1000;
 
   let score = 0;
   if (encoding === 'UTF-8') score += 400;
@@ -172,12 +183,37 @@ function scoreCandidate(entry) {
   // A declared frame rate means the uploader timed it to a specific master, so
   // the cues were placed against a real reference instead of eyeballed.
   if (fps) score += 70;
+  // Matching the master's clock is the whole ballgame for timing. A 25 fps
+  // subtitle on a 23.976 fps copy is over four percent long by the credits; no
+  // amount of nudging fixes that, so the matching upload goes to the front.
+  if (videoFps && declared) {
+    const drift = Math.abs(declared - videoFps);
+    if (drift < 0.12) score += 260;
+    else if (drift < 0.6) score += 120;
+    // Still keep a declared clock ahead of an unknown one: a known 23.976
+    // subtitle on a 25 fps master can be retimed exactly, while an undeclared
+    // file can only be estimated from the credits.
+    else score -= 30;
+  }
+  // The index returns the requested season/episode on every row, including
+  // files that are plainly another episode ("S07E04" in the S07E02 list). The
+  // name is the only trustworthy label; a wrong episode must lose no matter
+  // how perfect its frame rate looks.
+  if (target.season && target.episode) {
+    const parsed = episodeFromName(name);
+    if (parsed) {
+      if (parsed.season === Number(target.season) && parsed.episode === Number(target.episode)) {
+        score += 300;
+      } else {
+        score -= 500;
+      }
+    }
+  }
   if (/bluray|blu-ray|bdrip|web-?dl|webrip|remux/i.test(name)) score += 35;
   // Two-part rips carry a second clock for the second half. They desync by
   // minutes on a single-file copy, which no amount of nudging repairs.
   if (/\bcd\s?[12]\b|part\.?\s?[12]\b|disc\s?[12]\b/i.test(name)) score -= 90;
   if (/\bcam\b|\bhd-?cam\b|\bts\b|telesync|screener|\bscr\b/i.test(name)) score -= 60;
-  if (Number(entry.season) > 0 || Number(entry.episode) > 0) score += 20;
   return score;
 }
 
@@ -185,10 +221,11 @@ const cleanRelease = (entry) => String(entry.movieReleaseName ?? '').trim()
   || String(entry.subtitleFileName ?? '').replace(/\.[a-z0-9]{2,4}$/i, '').trim()
   || null;
 
-const variantUrl = (id, lang, candidateId, duration = null) => {
+const variantUrl = (id, lang, candidateId, duration = null, fps = null) => {
   const params = new URLSearchParams();
   if (candidateId) params.set('v', candidateId);
   if (Number.isFinite(duration) && duration > 0) params.set('d', String(Math.round(duration)));
+  if (Number.isFinite(fps) && fps > 0) params.set('f', String(fps));
   const query = params.toString();
   return `/api/subs/${encodeURIComponent(id)}/${encodeURIComponent(lang)}.vtt${query ? `?${query}` : ''}`;
 };
@@ -205,9 +242,10 @@ const variantUrl = (id, lang, candidateId, duration = null) => {
  * Returns `{ ok, imdbId, tracks: [{ lang, code, label, url, release, fps,
  * downloads, variants: [...] }] }`.
  */
-export async function subtitleTracks({ id, title, year, imdbId = null, season = null, episode = null, duration = null }) {
+export async function subtitleTracks({ id, title, year, imdbId = null, season = null, episode = null, duration = null, fps = null }) {
   const durationKey = Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 'auto';
-  const cacheKey = `${id}:${durationKey}`;
+  const fpsKey = Number.isFinite(fps) && fps > 0 ? Math.round(fps * 1000) : 'auto';
+  const cacheKey = `${id}:${durationKey}:${fpsKey}`;
   const cached = trackCache.get(cacheKey);
   if (cached && Date.now() - cached.at < TRACK_TTL) return cached.value;
 
@@ -243,7 +281,7 @@ export async function subtitleTracks({ id, title, year, imdbId = null, season = 
   for (const entry of raw) {
     const lang = String(entry.lang ?? '').toLowerCase();
     if (!lang || !entry.url) continue;
-    const scored = { score: scoreCandidate(entry), entry, lang };
+    const scored = { score: scoreCandidate(entry, fps, { season, episode }), entry, lang };
     const held = byLang.get(lang);
     if (!held) byLang.set(lang, [scored]);
     else held.push(scored);
@@ -254,7 +292,7 @@ export async function subtitleTracks({ id, title, year, imdbId = null, season = 
       list.sort((a, b) => b.score - a.score || (Number(b.entry.g) || 0) - (Number(a.entry.g) || 0));
       const variants = list.slice(0, 4).map(({ entry, score }, index) => ({
         id: String(entry.id ?? index),
-        url: variantUrl(id, lang, index === 0 ? null : String(entry.id ?? index), duration),
+        url: variantUrl(id, lang, index === 0 ? null : String(entry.id ?? index), duration, fps),
         release: cleanRelease(entry),
         fps: Number(entry.fpsMilli) ? Number(entry.fpsMilli) / 1000 : null,
         downloads: Number(entry.g) || 0,
@@ -267,6 +305,7 @@ export async function subtitleTracks({ id, title, year, imdbId = null, season = 
         code: ALPHA3[lang] ?? (lang.length === 2 ? lang : lang.slice(0, 2)),
         label: languageName(lang),
         url: best.url,
+        id: best.id,
         source: best.source,
         release: best.release,
         fps: best.fps,
@@ -529,21 +568,6 @@ async function fetchSubtitle(url) {
 }
 
 /**
- * Pick the upload whose final dialogue is closest to the actual media clock.
- *
- * Subtitle files usually stop before the final credits, so comparing the last
- * cue with the absolute end would punish the right file. A 2.5% trailing
- * margin, capped at three minutes, is a stable estimate across films and
- * episodes. The player supplies the exact stream duration; catalog runtime is
- * only the fallback hint.
- */
-function timingDistance(lastCue, duration) {
-  if (!Number.isFinite(lastCue) || !(duration > 0)) return Infinity;
-  const tail = Math.min(180, Math.max(20, duration * 0.025));
-  return Math.abs(lastCue - (duration - tail));
-}
-
-/**
  * One track as WebVTT, converted once and kept on disk.
  *
  * `variant` names a specific upload for the language; without one the ranked
@@ -551,34 +575,38 @@ function timingDistance(lastCue, duration) {
  * not reused after the process restarts; the converted file is the cache that
  * matters.
  */
-export async function subtitleVtt({ id, lang, title, year, imdbId = null, season = null, episode = null, duration = null, variant = null }) {
+export async function subtitleVtt({ id, lang, title, year, imdbId = null, season = null, episode = null, duration = null, fps = null, variant = null }) {
   const durationKey = Number.isFinite(duration) && duration > 0 ? `d${Math.round(duration)}` : 'auto';
+  const fpsKey = Number.isFinite(fps) && fps > 0 ? `f${Math.round(fps * 1000)}` : 'auto';
+
+  const list = await subtitleTracks({ id, title, year, imdbId, season, episode, duration, fps });
+  const track = list.tracks.find((entry) => entry.lang === lang);
+  if (!track) return { ok: false, status: 404, error: 'no such language' };
+
+  // Serve the winner the language list already ranked. Sorting again by the
+  // final cue alone let a wrong-episode file with a convenient runtime beat the
+  // correct episode, and it made the list's `fps` label describe a different
+  // file than the one the player received. One ranking, one answer.
+  const chosen = variant
+    ? (track.variants ?? []).find((entry) => entry.id === String(variant)) ?? track
+    : track;
+  const chosenId = sanitizeVariant(chosen.id ?? track.id ?? 'top');
   const suffix = variant ? `__${sanitizeVariant(variant)}` : '';
-  const file = join(titleDir(id), `${sanitizeLang(lang)}.${CACHE_VERSION}.${durationKey}${suffix}.vtt`);
+  // The candidate is part of the key: if a ranking change promotes another
+  // release, the old conversion must not answer for the new one.
+  const file = join(titleDir(id), `${sanitizeLang(lang)}.${CACHE_VERSION}.${durationKey}.${fpsKey}__${chosenId}${suffix}.vtt`);
   try {
     return { ok: true, body: await readFile(file, 'utf8') };
   } catch {
     // not converted yet
   }
 
-  const list = await subtitleTracks({ id, title, year, imdbId, season, episode, duration });
-  const track = list.tracks.find((entry) => entry.lang === lang);
-  if (!track) return { ok: false, status: 404, error: 'no such language' };
-
-  const candidates = variant
-    ? [(track.variants ?? []).find((entry) => entry.id === String(variant))].filter(Boolean)
-    : (track.variants?.length ? track.variants : [track]);
-  const loaded = (await Promise.allSettled(candidates.map(async (candidate) => ({
-    candidate,
-    converted: await fetchSubtitle(candidate.source),
-  })))).flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
-  if (!loaded.length) return { ok: false, status: 502, error: 'all subtitle files failed to download' };
-
-  loaded.sort((a, b) => {
-    const byTiming = timingDistance(a.converted.last, duration) - timingDistance(b.converted.last, duration);
-    return byTiming || b.candidate.score - a.candidate.score;
-  });
-  const winner = loaded[0].converted;
+  let winner;
+  try {
+    winner = await fetchSubtitle(chosen.source ?? track.source);
+  } catch (err) {
+    return { ok: false, status: err.status ?? 502, error: err.message };
+  }
   const body = winner.body;
 
   try {

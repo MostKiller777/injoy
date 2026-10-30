@@ -477,6 +477,8 @@ export async function openPlayer(item) {
   let captionOffset = Number(state.prefs.captionOffset) || 0;
   let captionScale = 1;
   let captionToken = 0;
+  let videoFps = null;
+  let captionFps = null;
   const listeners = [];
 
   const on = (target, event, handler, options) => {
@@ -688,6 +690,7 @@ export async function openPlayer(item) {
     iframe = null;
     captionTracks = [];
     activeCaption = null;
+    captionFps = null;
     renderCaptionButton();
     await startPlayback(nextId);
   }
@@ -1000,6 +1003,21 @@ export async function openPlayer(item) {
     if (!track) return;
     if (key && state.prefs.captionScales?.[key] !== undefined) return;
     if (Math.abs(captionScale - 1) > 0.0005) return;
+
+    // Best signal: both clocks are known, so the exact ratio is arithmetic.
+    // 25 fps subtitles on a 23.976 fps master stretch by 25 / 23.976.
+    if (videoFps && captionFps) {
+      const exact = captionFps / videoFps;
+      if (Math.abs(exact - 1) > 0.004) {
+        captionScale = setCaptionScaleFor(key, exact);
+        shiftCues(track);
+        flashNote(`Caption timing fitted ×${captionScale.toFixed(3)} (${captionFps}→${videoFps} fps)`, 3600);
+        return;
+      }
+    }
+
+    // Fallback: only a ratio that lands on a known frame-rate pair is auto-
+    // applied. Anything else stays manual.
     const ratio = fitRatio(track);
     if (!ratio || Math.abs(ratio - 1) < 0.012) return;
     const match = KNOWN_FPS_RATIOS.find((value) => Math.abs(ratio - value) < 0.006);
@@ -1051,6 +1069,7 @@ export async function openPlayer(item) {
       const key = captionKey(lang);
       captionOffset = captionOffsetFor(key);
       captionScale = captionScaleFor(key);
+      captionFps = Number(track?.fps) || null;
       let node = [...video.querySelectorAll('track')].find((entry) => entry.dataset.lang === lang);
       if (!node) {
         node = el('track', {
@@ -1213,14 +1232,15 @@ export async function openPlayer(item) {
    * Ask for the list. A stale answer is dropped: the player may have moved to
    * another title, or to an embed that cannot carry a text track at all.
    */
-  const loadCaptions = async (id, duration = null) => {
+  const loadCaptions = async (id, duration = null, fps = null) => {
     const token = ++captionToken;
     captionTracks = [];
     activeCaption = null;
+    captionFps = null;
     renderCaptionButton();
     if (!id) return;
 
-    const data = await getSubtitles(id, duration).catch(() => null);
+    const data = await getSubtitles(id, duration, fps).catch(() => null);
     if (closed || token !== captionToken) return;
 
     captionTracks = Array.isArray(data?.tracks) ? data.tracks : [];
@@ -1621,9 +1641,12 @@ export async function openPlayer(item) {
     // Captions belong to the title, not the mount: fetch once, keep the list
     // for the whole session so a quality switch or an embed fallback does not
     // have to ask again.
+    // The manifest can state the video's frame rate. Hand it to the caption
+    // selector so a 25 fps subtitle is not chosen for a 23.976 fps master.
+    videoFps = Number(source.session?.video?.frameRate ?? 0) || null;
     if (!captionTracks.length) {
       const subtitleDuration = Number(source.duration ?? source.session?.duration ?? 0);
-      void loadCaptions(item.playId ?? item.id, subtitleDuration);
+      void loadCaptions(item.playId ?? item.id, subtitleDuration, videoFps);
     }
     else renderCaptionButton();
     player.classList.remove('is-hidden-chrome');

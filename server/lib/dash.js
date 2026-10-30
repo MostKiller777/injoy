@@ -25,6 +25,18 @@ function attrs(tag) {
   return out;
 }
 
+/** DASH `frameRate` is either `24` or a rational `24000/1001`. */
+function frameRate(text) {
+  if (!text) return null;
+  const value = String(text).trim();
+  const [top, bottom] = value.split('/');
+  const numerator = Number(top);
+  const denominator = bottom ? Number(bottom) : 1;
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator === 0) return null;
+  const fps = numerator / denominator;
+  return fps > 1 && fps < 240 ? Math.round(fps * 1000) / 1000 : null;
+}
+
 function isoDuration(text) {
   if (!text) return 0;
   const match = /^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(String(text).trim());
@@ -114,6 +126,10 @@ export function parseMpd(xml, mpdUrl) {
         bandwidth: Number(repAttrs.bandwidth ?? 0),
         width: Number(repAttrs.width ?? 0),
         height: Number(repAttrs.height ?? 0),
+        // A subtitle timed for 25 fps drifts against a 23.976 fps master. The
+        // manifest knows which one this is, so the caption selector can pick a
+        // track with the same clock instead of guessing from the runtime.
+        frameRate: frameRate(repAttrs.frameRate ?? setAttrs.frameRate),
         initUrl,
         // Keep the number token but normalise its padding into a known field.
         mediaUrl: mediaUrl.replace(/\$Number%0(\d+)d\$/, (_, width) => `$Number${width}$`),
@@ -265,6 +281,7 @@ function registerDashSession(id, found, videos, video, index) {
       width: video.width,
       height: video.height,
       bandwidth: video.bandwidth,
+      frameRate: video.frameRate ?? null,
     },
     audio: {
       codecs: found.audio.codecs,
