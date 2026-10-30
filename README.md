@@ -26,20 +26,21 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 
 ```json
 {
-  "tmdbId": 603,
-  "title": "The Matrix",
-  "year": 1999,
-  "release": "1999-03-31",
-  "runtime": 8160,
-  "rating": 8.2,
-  "genres": ["Action", "Sci-Fi"],
-  "overview": "A hacker learns the world is a simulation.",
-  "poster": "/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg",
-  "backdrop": "/icmmSD4vTTDKOq2vvdulafOGw93.jpg",
+  "tmdbId": 1891,
+  "title": "Star Wars: Episode V - The Empire Strikes Back",
+  "year": 1980,
+  "release": "1980-05-21",
+  "runtime": 7440,
+  "rating": 8.7,
+  "genres": ["Adventure", "Fantasy", "Sci-Fi"],
+  "overview": "After the Empire overpowers the Rebel Alliance, Luke begins training with Yoda.",
+  "poster": "https://images.metahub.space/poster/medium/tt0080684/img",
+  "backdrop": "https://images.metahub.space/background/medium/tt0080684/img",
   "featured": false
 }
 ```
 
+- The example file adds The Empire Strikes Back, which is not in the built-in shelf, so copying it produces a visible new film.
 - `runtime` is seconds, `rating` is 0–10, `genres` are display names. `poster`/`backdrop` can be TMDB paths (`/file.jpg`) or full URLs from TMDB, Letterboxd or Metahub.
 - `release` controls the Newest shelf order. `featured: true` adds it to the hero shelf.
 - A custom record with the same `tmdbId` as a built-in film replaces that record. The id is always `tmdb:<tmdbId>`.
