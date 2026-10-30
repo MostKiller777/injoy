@@ -188,7 +188,7 @@ async function renderHome(signal) {
     for (const row of data.rows) fragment.append(ui.rail(row, handlers));
 
     fragment.append(el('div', { class: 'state', style: { paddingTop: '20px' } },
-      el('p', { text: 'Every film here is hand-picked and streamed through public embed sources.' }),
+      el('p', { text: 'Every film here is hand-picked; playback uses a local copy when available, otherwise a public embed.' }),
     ));
 
     ui.clear(view).append(fragment);

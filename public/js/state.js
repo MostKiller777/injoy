@@ -39,7 +39,14 @@ export const state = {
   watchlist: new Map(),
   progress: {},
   recent: [],
-  prefs: { muted: false, volume: 1, captionSize: 'middle', captionOffset: 0, captionOffsets: {} },
+  prefs: {
+    muted: false,
+    volume: 1,
+    captionSize: 'middle',
+    captionOffset: 0,
+    captionOffsets: {},
+    captionScales: {},
+  },
   ready: false,
 };
 
@@ -290,6 +297,33 @@ export function setCaptionOffsetFor(key, offset) {
     state.prefs.captionOffsets = { ...(state.prefs.captionOffsets ?? {}), [key]: normalized };
   } else {
     state.prefs.captionOffset = normalized;
+  }
+  persistPrefs();
+  return normalized;
+}
+
+/**
+ * Caption speed, per title and language.
+ *
+ * A constant offset fixes a track that starts late; it cannot fix a track that
+ * drifts. A subtitle timed for a 25 fps master played against a 23.976 fps copy
+ * falls a little further behind every minute, and by the end the gap is over
+ * four percent of the runtime. The scale stretches every cue around zero so the
+ * last line lands where the first line said it would.
+ */
+export function captionScaleFor(key) {
+  const stored = key ? state.prefs.captionScales?.[key] : undefined;
+  const value = Number(stored);
+  return Number.isFinite(value) && value > 0.8 && value < 1.25 ? value : 1;
+}
+
+export function setCaptionScaleFor(key, scale) {
+  const value = Number(scale);
+  const normalized = Number.isFinite(value)
+    ? Math.max(0.8, Math.min(1.25, Math.round(value * 1000) / 1000))
+    : 1;
+  if (key) {
+    state.prefs.captionScales = { ...(state.prefs.captionScales ?? {}), [key]: normalized };
   }
   persistPrefs();
   return normalized;

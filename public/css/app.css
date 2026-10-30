@@ -1291,7 +1291,7 @@ button { cursor: pointer; border: 0; background: none; }
 /* Sync nudges. The value in the middle is a button too — tapping it puts the
    track back on the file's own timing, which is the escape hatch after a
    handful of half-second corrections. */
-.caption-offset-group { display: flex; gap: 4px; margin-left: auto; align-items: center; }
+.caption-offset-group { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; margin-left: auto; align-items: center; }
 .caption-sync-row { align-items: flex-start; }
 .source-menu .caption-offset-group button {
   width: auto;
@@ -1315,6 +1315,14 @@ button { cursor: pointer; border: 0; background: none; }
   border-color: rgba(255, 255, 255, 0.1);
   background: transparent;
   color: var(--ink);
+}
+.source-menu .caption-scale-value {
+  min-width: 62px;
+  text-align: center;
+  font-size: 11.5px;
+  font-weight: 750;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Language filter. Thirty rows is a wall; typing three letters is not. */

@@ -45,6 +45,42 @@ function Stop-Listener {
   }
 }
 
+# Start a console program with no window at all.
+#
+# `Start-Process -WindowStyle Hidden` still asks Windows for a console window and
+# merely hides it after creation, which reads as a flash over whatever is on the
+# desktop every time the watchdog fires. CREATE_NO_WINDOW is the flag that stops
+# the window being created in the first place, and it is only reachable through
+# ProcessStartInfo.
+#
+# When $LogOut is set the child is wrapped in cmd.exe so its streams land in a
+# file; cmd inherits the same no-window flag, so nothing appears.
+function Start-NoWindow {
+  param(
+    [Parameter(Mandatory)][string]$FilePath,
+    [string[]]$Arguments = @(),
+    [string]$WorkingDirectory,
+    [string]$LogOut
+  )
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+
+  if ($LogOut) {
+    $psi.FileName = $env:ComSpec
+    $psi.Arguments = '/c ""' + $FilePath + '" ' + ($Arguments -join ' ') + ' > "' + $LogOut + '" 2>&1"'
+  } else {
+    $psi.FileName = $FilePath
+    $psi.Arguments = ($Arguments -join ' ')
+  }
+
+  if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+
+  return [System.Diagnostics.Process]::Start($psi)
+}
+
 if ($Stop) {
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force
   Stop-Listener
@@ -61,9 +97,12 @@ if ($NoServer) {
 } else {
   Stop-Listener
   Start-Sleep -Milliseconds 500
-  Start-Process -FilePath 'node' -ArgumentList 'server/index.js' `
-    -WorkingDirectory $root -WindowStyle Hidden `
-    -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr
+  $serverExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+  if (-not $serverExe) { $serverExe = 'node.exe' }
+  Start-NoWindow -FilePath $serverExe `
+    -Arguments @('server/index.js') `
+    -WorkingDirectory $root `
+    -LogOut $serverOut | Out-Null
   $ready = $false
   for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Milliseconds 400
@@ -90,9 +129,9 @@ Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 400
 Remove-Item $tunnelLog -ErrorAction SilentlyContinue
 
-Start-Process -FilePath $exe `
-  -ArgumentList 'tunnel', '--url', "http://${Host_}:$Port", '--no-autoupdate', '--logfile', $tunnelLog, '--loglevel', 'info' `
-  -WindowStyle Hidden
+Start-NoWindow -FilePath $exe `
+  -Arguments @('tunnel', '--url', "http://${Host_}:$Port", '--no-autoupdate', '--logfile', "`"$tunnelLog`"", '--loglevel', 'info') `
+  -WorkingDirectory $root | Out-Null
 
 $public = $null
 for ($i = 0; $i -lt 60; $i++) {

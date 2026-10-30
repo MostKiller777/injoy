@@ -1,5 +1,5 @@
 /* injoy service worker — shell cache only. API traffic always goes to the network. */
-const VERSION = 'injoy-v39';
+const VERSION = 'injoy-v41';
 const SHELL = [
   '/',
   '/index.html',
@@ -39,8 +39,19 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     (async () => {
       const cache = await caches.open(VERSION);
+
+      // The shell is versioned: a release bumps VERSION, activation deletes the
+      // previous cache, and these files cannot change underneath a live cache.
+      // Serving them from disk makes a repeat visit instant; HTML stays
+      // network-first so a deploy is still picked up immediately.
+      const isStatic = /^\/(?:js|css)\//.test(url.pathname) || /\.(?:svg|webmanifest)$/.test(url.pathname);
+      if (isStatic) {
+        const hit = await cache.match(request, { ignoreSearch: true });
+        if (hit) return hit;
+      }
+
       try {
-        // Network-first: a code change must never hide behind a stale shell.
+        // Network-first for documents and anything not pinned above.
         const response = await fetch(request);
         if (response.ok) cache.put(request, response.clone());
         return response;

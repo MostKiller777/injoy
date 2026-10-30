@@ -72,15 +72,58 @@ const SECURITY_HEADERS = {
 
 const gzipCache = new Map();
 
+/**
+ * The fields a card or rail actually paints.
+ *
+ * A catalogue item carries the overview, the source list, TMDB bookkeeping and
+ * a dozen other fields a poster card never reads. Shipping all of it for every
+ * tile made `/api/home` 480 KB of JSON for 236 cards. The detail endpoint still
+ * returns the whole record; list endpoints return what the list renders.
+ */
+function cardItem(item) {
+  return {
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    year: item.year,
+    poster: item.poster,
+    rating: item.rating,
+    badge: item.badge,
+    genres: item.genres,
+    seasons: item.seasons,
+    episodes: item.episodes,
+    network: item.network,
+  };
+}
+
+const cardPage = (data) => ({ ...data, items: (data.items ?? []).map(cardItem) });
+
 function json(res, status, payload, extra = {}) {
   const body = Buffer.from(JSON.stringify(payload));
-  res.writeHead(status, {
+  const headers = {
     'content-type': 'application/json; charset=utf-8',
-    'content-length': body.length,
     'cache-control': 'no-store',
     ...SECURITY_HEADERS,
     ...extra,
-  });
+  };
+
+  // The home payload is hundreds of kilobytes of catalogue metadata. Static
+  // files were already compressed; JSON was not, so the first paint waited on
+  // the full object graph over the wire. Compress anything worth compressing
+  // and keep the length honest for the client.
+  const acceptsGzip = /\bgzip\b/i.test(res.req?.headers?.['accept-encoding'] ?? '');
+  if (acceptsGzip && body.length > 1024) {
+    const compressed = gzipSync(body);
+    headers['content-encoding'] = 'gzip';
+    headers['content-length'] = compressed.length;
+    headers.vary = 'accept-encoding';
+    res.writeHead(status, headers);
+    res.end(compressed);
+    return;
+  }
+
+  headers['content-length'] = body.length;
+  res.writeHead(status, headers);
   res.end(body);
 }
 
@@ -164,6 +207,52 @@ function cacheSlotAvailable() {
 // One resolver run per title, even when several tabs press play together.
 const playInflight = new Map();
 
+// A headless browser sniff is the slowest part of starting a stream. The
+// upstream URL it finds stays valid for minutes, so the next play of the same
+// episode can skip the browser entirely.
+const resolveCache = new Map();
+const RESOLVE_TTL = 10 * 60_000;
+const RESOLVE_NEGATIVE_TTL = 60_000;
+const PLAY_DEADLINE_MS = 4_500;
+
+// A resolved DASH manifest is also expensive to fetch. Cache the playable
+// record (never the per-play session id) so the second press of play is a
+// session build, not another provider round trip.
+const playableCache = new Map();
+const PLAYABLE_TTL = 5 * 60_000;
+
+const resolveKey = (target) => [
+  target.tmdbId ?? '',
+  target.imdbId ?? '',
+  target.season ?? '',
+  target.episode ?? '',
+].join('|');
+
+async function resolveUpstream(target) {
+  const key = resolveKey(target);
+  const hit = resolveCache.get(key);
+  if (hit && Date.now() - hit.at < hit.ttl) return hit.value;
+
+  const value = await resolveStream(target);
+  if (resolveCache.size > 500) resolveCache.clear();
+  resolveCache.set(key, {
+    at: Date.now(),
+    ttl: value.url ? RESOLVE_TTL : RESOLVE_NEGATIVE_TTL,
+    value,
+  });
+  return value;
+}
+
+/** Let the direct resolver race a deadline; the caller falls back to an embed. */
+function withDeadline(promise, ms) {
+  let timer = null;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, timeout: true }), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Resolve a title to something the player can mount.
  *
@@ -174,8 +263,8 @@ const playInflight = new Map();
  * three end up as a `direct` source, so the client never learns which one it
  * got — it mounts whatever session it is handed.
  */
-async function resolvePlayable(id, target) {
-  const resolved = await resolveStream(target);
+async function resolvePlayableUncached(id, target) {
+  const resolved = await resolveUpstream(target);
   if (!resolved.url) return { ok: false, error: resolved.error ?? 'no provider produced a stream' };
 
   const referer = resolved.referer ?? null;
@@ -212,6 +301,26 @@ async function resolvePlayable(id, target) {
     page,
     session: openRawSession({ id, url: resolved.url, referer }),
   };
+}
+
+/**
+ * Playable record with a short cache.
+ *
+ * HLS sessions are not cached: their payload describes one open session. DASH
+ * and progressive records are just the manifest and track description, so they
+ * can be reused while the route builds a fresh session around them.
+ */
+async function resolvePlayable(id, target) {
+  const key = resolveKey(target);
+  const hit = playableCache.get(key);
+  if (hit && Date.now() - hit.at < PLAYABLE_TTL) return hit.value;
+
+  const value = await resolvePlayableUncached(id, target);
+  if (value.ok && value.kind !== 'hls') {
+    if (playableCache.size > 200) playableCache.clear();
+    playableCache.set(key, { at: Date.now(), value });
+  }
+  return value;
 }
 
 async function readBody(req, limit = 262_144) {
@@ -407,7 +516,10 @@ async function handleApi(req, res, url) {
   // home
   if (pathname === '/api/home') {
     const data = await cache.wrap('home', catalog.TTL.home, () => catalog.home());
-    return json(res, 200, data);
+    return json(res, 200, {
+      ...data,
+      rows: (data.rows ?? []).map((row) => ({ ...row, items: (row.items ?? []).map(cardItem) })),
+    });
   }
 
   // search
@@ -417,17 +529,19 @@ async function handleApi(req, res, url) {
     const page = Math.max(1, Math.min(20, Number(searchParams.get('page')) || 1));
     const key = `search:${q.toLowerCase()}:${page}`;
     const data = await cache.wrap(key, catalog.TTL.search, () => catalog.searchTitles(q, page));
-    return json(res, 200, data);
+    return json(res, 200, cardPage(data));
   }
 
   // browse
   if (pathname === '/api/browse') {
     const page = Math.max(1, Math.min(20, Number(searchParams.get('page')) || 1));
-    const genre = searchParams.get('genre') ?? '';
+    // Accept both the UI's id (`noir`, `scifi`) and a hand-typed label
+    // (`Noir`, `Sci-Fi`). The catalogue keys genres by id.
+    const genre = (searchParams.get('genre') ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
     const sort = searchParams.get('sort') ?? 'popular';
     const key = `browse:${genre}:${sort}:${page}`;
     const data = await cache.wrap(key, catalog.TTL.search, () => catalog.browse({ page, genre, sort }));
-    return json(res, 200, data);
+    return json(res, 200, cardPage(data));
   }
 
   // genres
@@ -439,7 +553,7 @@ async function handleApi(req, res, url) {
   // series shelf
   if (pathname === '/api/series') {
     const data = await cache.wrap('series', 30 * 60_000, () => catalog.seriesShelf());
-    return json(res, 200, data);
+    return json(res, 200, cardPage(data));
   }
 
   // random
@@ -546,7 +660,10 @@ async function handleApi(req, res, url) {
       playInflight.set(id, pending);
       pending.finally(() => playInflight.delete(id));
     }
-    const found = await pending;
+    // A provider sniff that takes longer than a few seconds should not keep the
+    // visitor staring at "Preparing stream". The embed is mounted instead, and
+    // the resolver keeps working in the background so the next play is direct.
+    const found = await withDeadline(pending, PLAY_DEADLINE_MS);
 
     if (found.ok && found.kind === 'dash') {
       const session = createDashSession(id, found);

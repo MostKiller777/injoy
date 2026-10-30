@@ -4,10 +4,12 @@ import { createHlsFeeder } from './hls.js';
 import {
   CAPTION_SIZES,
   captionOffsetFor,
+  captionScaleFor,
   progressFor,
   rememberShown,
   saveProgress,
   setCaptionOffsetFor,
+  setCaptionScaleFor,
   setCaptionSize,
   setVolume,
   state,
@@ -24,6 +26,7 @@ const KEY_ROWS = [
   ['J / L', 'Seek 10 seconds'],
   ['M', 'Mute'],
   ['C', 'Subtitles on or off'],
+  ['[ / ]', 'Nudge subtitles 0.1 seconds'],
   ['F', 'Fullscreen'],
   ['? / H', 'Shortcuts panel'],
   ['Esc', 'Close the player'],
@@ -472,6 +475,7 @@ export async function openPlayer(item) {
   let activeCaption = null;
   let captionSize = CAPTION_SIZES.includes(state.prefs.captionSize) ? state.prefs.captionSize : 'middle';
   let captionOffset = Number(state.prefs.captionOffset) || 0;
+  let captionScale = 1;
   let captionToken = 0;
   const listeners = [];
 
@@ -893,8 +897,8 @@ export async function openPlayer(item) {
         cue.__baseStart = cue.startTime;
         cue.__baseEnd = cue.endTime;
       }
-      const start = cue.__baseStart + captionOffset;
-      const end = cue.__baseEnd + captionOffset;
+      const start = cue.__baseStart * captionScale + captionOffset;
+      const end = cue.__baseEnd * captionScale + captionOffset;
       if (end <= 0.2) continue;
       try {
         cue.startTime = Math.max(0, start);
@@ -923,15 +927,110 @@ export async function openPlayer(item) {
    * short poll covers a track that was already cached before the listener
    * landed.
    */
-  const shiftWhenReady = (node, attempt = 0) => {
+  const shiftWhenReady = (node, key = null, attempt = 0) => {
     if (!node) return;
     const track = node.track;
     if (track?.cues?.length) {
       shiftCues(track);
+      autoFitTiming(track, key);
       return;
     }
     if (attempt >= 40) return;
-    setTimeout(() => shiftWhenReady(node, attempt + 1), 100);
+    setTimeout(() => shiftWhenReady(node, key, attempt + 1), 100);
+  };
+
+  /** Runtime the element is actually playing, from either the element or session. */
+  const mediaDuration = () => {
+    for (const value of [video?.duration, current?.duration]) {
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    return 0;
+  };
+
+  /**
+   * Where the subtitle thinks the dialogue ends, in its own timing.
+   *
+   * `__baseStart`/`__baseEnd` are the times the file shipped with; the live cue
+   * times may already carry the user's offset and scale.
+   */
+  const captionSpan = (track) => {
+    const cues = track?.cues;
+    if (!cues?.length) return null;
+    const firstCue = cues[0];
+    const lastCue = cues[cues.length - 1];
+    const first = firstCue.__baseStart ?? firstCue.startTime;
+    const last = lastCue.__baseEnd ?? lastCue.endTime;
+    if (!(last > first)) return null;
+    return { first, last, span: last - first };
+  };
+
+  /**
+   * How much the track must stretch to end where this copy ends.
+   *
+   * Subtitles stop before the credits, so the expected final cue is the runtime
+   * minus a small tail. A stable tail estimate is what the server uses to pick
+   * the release; the same estimate drives the client-side fit.
+   */
+  const fitRatio = (track) => {
+    const duration = mediaDuration();
+    const span = captionSpan(track);
+    if (!duration || !span || span.span < 30) return null;
+    const tail = Math.min(180, Math.max(20, duration * 0.025));
+    const ratio = (duration - tail - span.first) / span.span;
+    return Number.isFinite(ratio) && ratio > 0.8 && ratio < 1.25 ? ratio : null;
+  };
+
+  const KNOWN_FPS_RATIOS = [
+    25 / 23.976,
+    24 / 23.976,
+    25 / 24,
+    23.976 / 25,
+    24 / 25,
+  ];
+
+  /**
+   * Automatic frame-rate fit.
+   *
+   * A 25 fps subtitle against a 23.976 fps copy drifts steadily; a constant
+   * offset cannot repair it. Only a ratio that lands on a known frame-rate pair
+   * is applied automatically, and only when nothing has been saved for this
+   * title and language — a manual choice always wins.
+   */
+  const autoFitTiming = (track, key) => {
+    if (!track) return;
+    if (key && state.prefs.captionScales?.[key] !== undefined) return;
+    if (Math.abs(captionScale - 1) > 0.0005) return;
+    const ratio = fitRatio(track);
+    if (!ratio || Math.abs(ratio - 1) < 0.012) return;
+    const match = KNOWN_FPS_RATIOS.find((value) => Math.abs(ratio - value) < 0.006);
+    if (!match) return;
+    captionScale = setCaptionScaleFor(key, match);
+    shiftCues(track);
+    flashNote(`Caption timing fitted ×${captionScale.toFixed(3)}`, 3200);
+  };
+
+  const applyCaptionFit = () => {
+    const track = showingTrack();
+    if (!track) return;
+    const ratio = fitRatio(track);
+    if (!ratio) {
+      flashNote('Timing already matches this copy', 2400);
+      return;
+    }
+    const target = Math.abs(ratio - 1) < 0.002 ? 1 : ratio;
+    captionScale = setCaptionScaleFor(activeCaption ? captionKey(activeCaption) : null, target);
+    shiftCues(track);
+    flashNote(captionScale === 1 ? 'Caption timing reset' : `Caption timing fitted ×${captionScale.toFixed(3)}`, 2600);
+    if (!captionMenu.hidden) openCaptions();
+  };
+
+  const resetCaptionTiming = () => {
+    captionOffset = 0;
+    captionScale = 1;
+    setCaptionOffsetFor(activeCaption ? captionKey(activeCaption) : null, 0);
+    setCaptionScaleFor(activeCaption ? captionKey(activeCaption) : null, 1);
+    shiftCues(showingTrack());
+    if (!captionMenu.hidden) openCaptions();
   };
 
   /**
@@ -949,7 +1048,9 @@ export async function openPlayer(item) {
     if (lang) {
       // Timing corrections belong to this title and language. Switching from
       // one episode or language must never carry the previous track's offset.
-      captionOffset = captionOffsetFor(captionKey(lang));
+      const key = captionKey(lang);
+      captionOffset = captionOffsetFor(key);
+      captionScale = captionScaleFor(key);
       let node = [...video.querySelectorAll('track')].find((entry) => entry.dataset.lang === lang);
       if (!node) {
         node = el('track', {
@@ -966,8 +1067,8 @@ export async function openPlayer(item) {
       }
       // Cues parse asynchronously and the event fires on the element, so both
       // the listener and a poll are wired — see `shiftWhenReady`.
-      node.addEventListener('load', () => shiftCues(node.track), { once: true });
-      shiftWhenReady(node);
+      node.addEventListener('load', () => shiftWhenReady(node, key), { once: true });
+      shiftWhenReady(node, key);
     } else {
       for (const entry of video.querySelectorAll('track')) entry.track.mode = 'disabled';
     }
@@ -1060,13 +1161,14 @@ export async function openPlayer(item) {
           on: { click: () => applyCaptionSize(size) },
         }, el('span', { text: size[0].toUpperCase() + size.slice(1) })))));
 
-    const offsetText = captionOffset === 0
+    const timingAuto = captionOffset === 0 && Math.abs(captionScale - 1) < 0.0005;
+    const offsetText = timingAuto
       ? 'Auto'
       : `${captionOffset > 0 ? '+' : ''}${captionOffset.toFixed(1)}s`;
     const offsetValue = el('button', {
       type: 'button', class: 'caption-offset-value',
       'aria-label': 'Reset subtitle timing to automatic',
-      on: { click: () => applyCaptionOffset(0) },
+      on: { click: () => resetCaptionTiming() },
     }, el('span', { text: offsetText }));
 
     const offsetRow = el('div', { class: 'caption-size caption-sync-row' },
@@ -1078,11 +1180,28 @@ export async function openPlayer(item) {
         el('button', { type: 'button', 'aria-label': 'Move captions 0.1 seconds later', on: { click: () => applyCaptionOffset(captionOffset + 0.1) } }, el('span', { text: '+0.1s' })),
         el('button', { type: 'button', 'aria-label': 'Move captions 0.5 seconds later', on: { click: () => applyCaptionOffset(captionOffset + 0.5) } }, el('span', { text: '+0.5s' }))));
 
+    // Drift repair. A constant offset cannot keep a 25 fps subtitle aligned to
+    // a 23.976 fps copy; stretching the whole track can. The value stays visible
+    // so a fitted track never looks like the file's own timing.
+    const speedRow = el('div', { class: 'caption-size caption-sync-row' },
+      el('span', { class: 'caption-size-label', text: 'Speed' }),
+      el('div', { class: 'caption-offset-group', role: 'group', 'aria-label': 'Subtitle speed' },
+        el('button', {
+          type: 'button', 'aria-label': 'Fit subtitle timing to this copy',
+          on: { click: () => applyCaptionFit() },
+        }, el('span', { text: 'Fit' })),
+        el('span', {
+          class: 'caption-scale-value',
+          text: captionScale === 1 ? '1.000×' : `${captionScale.toFixed(3)}×`,
+          title: 'Subtitle speed used to correct frame-rate drift',
+        })));
+
     paint('');
     captionMenu.replaceChildren(
       el('h3', { text: `Subtitles · ${captionTracks.length} languages` }),
       sizeRow,
       offsetRow,
+      speedRow,
       search,
       list,
     );
@@ -1168,6 +1287,12 @@ export async function openPlayer(item) {
     if (event.key.toLowerCase() === 'e' && episodesPanel) {
       event.preventDefault();
       toggleEpisodes();
+      return;
+    }
+    if (event.key === '[' || event.key === ']') {
+      if (!activeCaption) return;
+      event.preventDefault();
+      applyCaptionOffset(captionOffset + (event.key === ']' ? 0.1 : -0.1));
       return;
     }
     if (!video) return;
@@ -1416,11 +1541,30 @@ export async function openPlayer(item) {
     syncVolumeIcon();
   };
 
+  /**
+   * Cycle the backup players.
+   *
+   * A provider can answer with its own landing page or a dead frame, and a
+   * cross-origin iframe cannot be inspected to tell. The next source is one
+   * click away instead of a dead end.
+   */
+  const nextEmbed = () => {
+    const list = sources.filter((entry) => entry.kind === 'embed');
+    if (list.length < 2) return;
+    const at = list.indexOf(current);
+    const next = list[(at + 1) % list.length];
+    const index = sources.indexOf(next);
+    if (index < 0) return;
+    flashNote(`Source: ${next.label}`, 1800);
+    mountSource(index);
+  };
+
   const buildEmbedControls = () => {
+    const embedCount = sources.filter((entry) => entry.kind === 'embed').length;
     controls.replaceChildren(
       el('div', { class: 'controls-row' },
         el('button', {
-          class: 'pill-select', type: 'button',
+          class: 'pill-select', type: 'button', 'aria-label': 'Reload the backup player',
           on: {
             click: () => {
               if (!iframe) return;
@@ -1428,7 +1572,13 @@ export async function openPlayer(item) {
               iframe.src = src;
             },
           },
-        }, el('span', { text: 'Reload' })),
+        }, icon('refresh'), el('span', { text: 'Reload' })),
+        embedCount > 1
+          ? el('button', {
+              class: 'pill-select', type: 'button', 'aria-label': 'Try the next source',
+              on: { click: nextEmbed },
+            }, icon('shuffle'), el('span', { text: 'Next source' }))
+          : null,
         // Direct playback can fall back to an iframe. Keep the season drawer
         // available there too; otherwise a failed stream would strand a series
         // on the episode that happened to start first.
@@ -1447,10 +1597,10 @@ export async function openPlayer(item) {
    */
   const fallbackToEmbed = async (message) => {
     const alt = await getSources(item.playId ?? item.id).catch(() => null);
-    const embed = (alt?.sources ?? []).find((entry) => entry.kind === 'embed');
-    if (embed) {
-      sources = [embed];
-      toast('Switched to the backup player', 'warn');
+    const embeds = (alt?.sources ?? []).filter((entry) => entry.kind === 'embed');
+    if (embeds.length) {
+      sources = embeds;
+      toast(embeds.length > 1 ? 'Switched to a backup player — more sources in the bar' : 'Switched to the backup player', 'warn');
       mountSource(0);
       return;
     }
@@ -1647,7 +1797,17 @@ export async function openPlayer(item) {
       return;
     }
 
-    sources = [source];
+    // An embed reply can still carry alternatives. Pull the full list once so
+    // the bar can offer "Next source" if the first provider paints a dead
+    // frame; the server's chosen source stays first.
+    if (source.kind === 'embed') {
+      const alt = await getSources(playId).catch(() => null);
+      const embeds = (alt?.sources ?? []).filter((entry) => entry.kind === 'embed');
+      sources = [source, ...embeds.filter((entry) => entry.url !== source.url)];
+      if (closed) return;
+    } else {
+      sources = [source];
+    }
     mountSource(0);
   }
 

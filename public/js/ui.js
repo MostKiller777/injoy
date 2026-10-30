@@ -59,6 +59,7 @@ const ICONS = {
   cc: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M11 10.4a2.2 2.2 0 1 0 0 3.2"/><path d="M17 10.4a2.2 2.2 0 1 0 0 3.2"/>',
   download: '<path d="M12 4v11"/><path d="m7 12 5 5 5-5"/><path d="M5 20h14"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01" stroke-width="2.4"/>',
+  refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>',
 };
 
 export function icon(name, className = '') {

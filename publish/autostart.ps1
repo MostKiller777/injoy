@@ -45,6 +45,7 @@ $settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
   -StartWhenAvailable `
+  -Hidden `
   -RestartCount 3 `
   -RestartInterval (New-TimeSpan -Minutes 5) `
   -ExecutionTimeLimit ([TimeSpan]::Zero)
@@ -70,6 +71,7 @@ $watchSettings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
   -StartWhenAvailable `
+  -Hidden `
   -ExecutionTimeLimit ([TimeSpan]::Zero)
 
 Register-ScheduledTask -TaskName "$TaskName-watch" -Action $watchAction -Trigger $watchTrigger `

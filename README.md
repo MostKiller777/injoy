@@ -153,6 +153,8 @@ It fetches `cloudflared` once into `publish\bin\`, starts `node server/index.js`
 
 The URL is also written to `data/public-url.txt`. `-NoTunnel` starts only the server, `-Port` changes the port, `-Stop` shuts both down. Cloudflare's quick tunnel needs no account, no card and no quota, and the app talks to `127.0.0.1` — the tunnel is the only thing exposed.
 
+Both children start through `Start-NoWindow`, which sets `CreateNoWindow` in `ProcessStartInfo`. That matters: `Start-Process -WindowStyle Hidden` still asks Windows for a console and hides it after creation, so a black window flashes over the desktop every time the watchdog rebuilds the tunnel. `CREATE_NO_WINDOW` stops the window existing at all, so a restart is invisible. `publish\silent.vbs` does the same job one level up, for the task that launches PowerShell.
+
 **Keep it up forever — `publish\autostart.ps1`**
 
 ```powershell
