@@ -1,5 +1,8 @@
+import { existsSync, readFileSync } from 'node:fs';
+
 import { embedSources } from './providers.js';
 import { imgProxy } from './images.js';
+import { dataPath } from './paths.js';
 import { EXTRA_FILMS } from './curated-extra.js';
 import { MORE_FILMS } from './curated-more.js';
 import { DEEP_FILMS } from './curated-200.js';
@@ -1392,9 +1395,61 @@ const BASE_FILMS = [
  * the merge keeps the first record per TMDB id and drops the rest — otherwise
  * the grid shows the same film twice and the id map points at a stale object.
  */
+/**
+ * Optional films added without editing the source.
+ *
+ * `data/custom-films.json` (or `$DATA_DIR/custom-films.json`) is read once at
+ * startup. The file is an array of records; a custom record with the same TMDB
+ * id as a built-in one wins. Invalid JSON is logged and ignored, so a typo
+ * cannot take the catalogue down.
+ */
+function loadCustomFilms() {
+  const file = dataPath('custom-films.json');
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.films) ? parsed.films : [];
+    const films = [];
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object') continue;
+      const tmdbId = Number(raw.tmdbId ?? String(raw.id ?? '').replace(/^tmdb:/i, ''));
+      const title = String(raw.title ?? '').trim();
+      if (!Number.isFinite(tmdbId) || tmdbId <= 0 || !title) continue;
+      const year = Number(raw.year) || null;
+      films.push({
+        ...raw,
+        tmdbId,
+        title,
+        year,
+        release: String(raw.release ?? (year ? `${year}-01-01` : '1970-01-01')),
+        overview: String(raw.overview ?? ''),
+        genres: Array.isArray(raw.genres) ? raw.genres.filter((genre) => typeof genre === 'string') : [],
+        rating: Number.isFinite(Number(raw.rating)) ? Number(raw.rating) : null,
+        runtime: Number.isFinite(Number(raw.runtime)) ? Number(raw.runtime) : null,
+        posterUrl: raw.posterUrl ?? raw.poster ?? raw.posterPath ?? null,
+        backdropUrl: raw.backdropUrl ?? raw.backdrop ?? raw.backdropPath ?? null,
+        cast: Array.isArray(raw.cast) ? raw.cast : [],
+        production: Array.isArray(raw.production) ? raw.production : [],
+      });
+    }
+    if (films.length) console.log(`[curated] ${films.length} custom film(s) loaded from ${file}`);
+    return films;
+  } catch (err) {
+    console.warn(`[curated] custom-films.json ignored: ${err.message}`);
+    return [];
+  }
+}
+
 const FILMS = (() => {
   const seen = new Map();
-  for (const film of [...BASE_FILMS, ...EXTRA_FILMS, ...MORE_FILMS, ...DEEP_FILMS, ...NEW_FILMS]) {
+  for (const film of [
+    ...loadCustomFilms(),
+    ...BASE_FILMS,
+    ...EXTRA_FILMS,
+    ...MORE_FILMS,
+    ...DEEP_FILMS,
+    ...NEW_FILMS,
+  ]) {
     const id = Number(film.tmdbId);
     if (!Number.isFinite(id) || seen.has(id)) continue;
     seen.set(id, film);

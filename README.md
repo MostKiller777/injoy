@@ -20,6 +20,33 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - Adult and exploitation titles are excluded from the catalog.
 - TMDB integration (optional): with a key, detail pages resolve live metadata, cast, crew and trailers for the same ids.
 
+**Adding a film without editing the source**
+- Copy `deploy/custom-films.example.json` to `data/custom-films.json` (or `$DATA_DIR/custom-films.json` on a host) and edit the array.
+- Minimum useful record:
+
+```json
+{
+  "tmdbId": 603,
+  "title": "The Matrix",
+  "year": 1999,
+  "release": "1999-03-31",
+  "runtime": 8160,
+  "rating": 8.2,
+  "genres": ["Action", "Sci-Fi"],
+  "overview": "A hacker learns the world is a simulation.",
+  "poster": "/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg",
+  "backdrop": "/icmmSD4vTTDKOq2vvdulafOGw93.jpg",
+  "featured": false
+}
+```
+
+- `runtime` is seconds, `rating` is 0–10, `genres` are display names. `poster`/`backdrop` can be TMDB paths (`/file.jpg`) or full URLs from TMDB, Letterboxd or Metahub.
+- `release` controls the Newest shelf order. `featured: true` adds it to the hero shelf.
+- A custom record with the same `tmdbId` as a built-in film replaces that record. The id is always `tmdb:<tmdbId>`.
+- Restart after editing: `node server/index.js` locally, or `sudo systemctl restart injoy` on the VM. The film then appears in search, Films, Newest, its detail page and playback.
+- The file is read once at startup. Invalid JSON is logged and ignored; the catalogue still boots.
+- Series are separate: they come from the frozen `server/lib/series-data.js`; there is no custom-series file yet.
+
 **Series**
 - 64 shows and 4,178 episodes, frozen from TVMaze into `server/lib/series-data.js`, so season and episode browsing never touches the network at request time.
 - Series live in the `tv:<tvmazeId>` namespace, so detail pages, the watchlist and resume points behave exactly like films. Episodes play from `tv:<id>:<season>:<episode>`, which resolves to an IMDb-keyed embed.
