@@ -630,6 +630,17 @@ export async function openPlayer(item) {
           el('div', {},
             el('h3', { text: `${item.title.split(' — ')[0]} — all seasons` }),
             el('p', { class: 'episodes-sub', text: `${seasons.length} seasons · ${seasons.reduce((sum, season) => sum + season.episodes.length, 0)} episodes · playback continues behind this` }),
+            el('a', {
+              class: 'episodes-all',
+              href: `#/show/${encodeURIComponent(item.id)}`,
+              on: {
+                click: (event) => {
+                  event.preventDefault();
+                  closePlayer();
+                  location.hash = `#/show/${encodeURIComponent(item.id)}`;
+                },
+              },
+            }, 'Open full series page'),
           ),
           el('button', { class: 'keys-close', type: 'button', 'aria-label': 'Close episodes', on: { click: () => toggleEpisodes(false) } }, icon('close')),
         ),

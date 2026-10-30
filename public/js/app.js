@@ -112,6 +112,22 @@ function route() {
     return;
   }
 
+  // A dedicated series page: every season expanded, no player over the top.
+  // The detail sheet auto-plays a show, so this is the place to browse all 151
+  // episodes without the video covering the list.
+  if (hash.startsWith('#/show/')) {
+    const id = decodeURIComponent(hash.slice('#/show/'.length));
+    baseRoute = hash;
+    lastDetailId = null;
+    routeAbort?.abort();
+    const controller = new AbortController();
+    routeAbort = controller;
+    ui.closeDetail();
+    window.scrollTo(0, 0);
+    setActiveNav('/series');
+    return renderShow(id, controller.signal);
+  }
+
   baseRoute = hash;
   lastDetailId = null;
   routeAbort?.abort();
@@ -299,6 +315,123 @@ async function renderSeries(signal) {
     if (signal?.aborted) return;
     note.replaceChildren(ui.emptyState({ title: 'No series', message: err.message }));
   }
+}
+
+/* ------------------------------ series page ------------------------------ */
+
+/**
+ * Every season, expanded.
+ *
+ * Opening a show from a card is a play intent: the detail sheet fetches, then
+ * the player covers it. That is right for watching, wrong for browsing. This
+ * route is the browse view — all seasons, all episodes, no autoplay, no iframe
+ * over the list.
+ */
+async function renderShow(id, signal) {
+  hero.hidden = true;
+  ui.clear(view);
+  view.append(el('div', { class: 'state', style: { padding: '70px 24px' } }, el('div', { class: 'spinner' })));
+
+  let detail;
+  try {
+    detail = await getDetail(id);
+  } catch (err) {
+    if (signal?.aborted) return;
+    view.replaceChildren(ui.emptyState({
+      title: 'Could not load this series',
+      message: err.message,
+      actionLabel: 'Back to series',
+      onAction: () => { location.hash = '#/series'; },
+    }));
+    return;
+  }
+  if (signal?.aborted) return;
+
+  const seasons = Array.isArray(detail.seasons) ? detail.seasons : [];
+  const total = seasons.reduce((sum, season) => sum + season.episodes.length, 0);
+  const first = seasons[0]?.episodes[0] ?? null;
+
+  const play = (episode, season) => {
+    openPlayer({
+      ...detail,
+      playId: episode.playId,
+      title: `${detail.title} — S${season.number}E${episode.number} · ${episode.name}`,
+    });
+  };
+
+  document.title = `${detail.title} — Injoy`;
+
+  const facts = [
+    detail.year ? String(detail.year) : null,
+    detail.rating ? `${detail.rating.toFixed(1)} / 10` : null,
+    seasons.length ? `${seasons.length} seasons` : null,
+    total ? `${total} episodes` : null,
+  ].filter(Boolean);
+
+  const head = el('section', { class: 'show-head' },
+    detail.poster
+      ? el('img', { class: 'show-poster', src: detail.poster, alt: '', loading: 'eager', referrerpolicy: 'no-referrer' })
+      : el('div', { class: 'show-poster show-poster-empty', text: ui.initials(detail.title) }),
+    el('div', { class: 'show-info' },
+      el('a', { class: 'show-back', href: '#/series', text: '← All series' }),
+      el('h1', { text: detail.title }),
+      el('div', { class: 'show-meta' }, ...facts.map((fact) => el('span', { text: fact }))),
+      detail.overview ? el('p', { class: 'show-overview', text: detail.overview }) : null,
+      el('div', { class: 'show-actions' },
+        first ? el('button', {
+          class: 'btn btn-primary', type: 'button',
+          on: { click: () => play(first, seasons[0]) },
+        }, ui.icon('play'), el('span', { text: `Play S1E1` })) : null,
+        el('a', { class: 'btn btn-ghost', href: '#/series', text: 'Series shelf' }),
+      ),
+    ),
+  );
+
+  const jumps = seasons.length > 1
+    ? el('nav', { class: 'show-jumps', 'aria-label': 'Jump to season' },
+        ...seasons.map((season) => el('button', {
+          class: 'show-jump', type: 'button',
+          on: {
+            click: () => document.getElementById(`season-${season.number}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+          },
+        }, `Season ${season.number}`)))
+    : null;
+
+  const sections = seasons.map((season) => el('section', {
+    class: 'show-season', id: `season-${season.number}`,
+  },
+    el('div', { class: 'show-season-head' },
+      el('h2', { class: 'show-season-title', text: `Season ${season.number}` }),
+      el('span', { class: 'show-season-sub', text: `${season.episodes.length} episodes` }),
+    ),
+    el('div', { class: 'episode-list show-episode-list' },
+      ...season.episodes.map((episode) => {
+        const meta = [
+          episode.airdate ?? null,
+          episode.runtime ? `${Math.round(episode.runtime / 60)} min` : null,
+        ].filter(Boolean).join(' · ');
+        return el('button', {
+          class: 'episode', type: 'button',
+          'aria-label': `Play season ${season.number} episode ${episode.number}, ${episode.name}`,
+          on: { click: () => play(episode, season) },
+        },
+          el('span', { class: 'episode-num', text: String(episode.number).padStart(2, '0') }),
+          el('span', { class: 'episode-body' },
+            el('span', { class: 'episode-name', text: episode.name }),
+            meta ? el('span', { class: 'episode-meta', text: meta }) : null,
+            episode.summary ? el('span', { class: 'episode-summary', text: episode.summary }) : null,
+          ),
+          el('span', { class: 'episode-play', 'aria-hidden': 'true', text: '▶' }),
+        );
+      }),
+    ),
+  ));
+
+  view.replaceChildren(
+    head,
+    jumps,
+    ...(sections.length ? sections : [ui.emptyState({ title: 'No episodes', message: 'This series has no episode list yet.' })]),
+  );
 }
 
 /* -------------------------------- genres --------------------------------- */

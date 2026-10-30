@@ -1454,6 +1454,15 @@ kbd {
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
 }
+.episodes-all {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--acc-2);
+  border-bottom: 1px solid transparent;
+}
+.episodes-all:hover { border-bottom-color: currentColor; }
 
 .player-episodes .season-tabs { margin: 12px 0 12px; }
 .player-episodes .season-tab { padding: 6px 13px; font-size: 0.8rem; }
@@ -1731,6 +1740,115 @@ kbd {
 }
 
 /* -------------------------------- episodes -------------------------------- */
+
+/* Series browse page: every season expanded, no player over the list. */
+.show-head {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  gap: clamp(18px, 3vw, 34px);
+  align-items: start;
+  margin: 8px 0 28px;
+}
+.show-poster {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: #0a0b12;
+}
+.show-poster-empty {
+  display: grid;
+  place-items: center;
+  font-size: 42px;
+  font-weight: 800;
+  color: var(--ink-faint);
+}
+.show-info { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.show-back {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-dim);
+  width: fit-content;
+  transition: color var(--fast);
+}
+.show-back:hover { color: var(--ink); }
+.show-info h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+}
+.show-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--ink-dim);
+  font-size: 13px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.show-meta span {
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.show-overview {
+  margin: 0;
+  max-width: 70ch;
+  color: var(--ink-dim);
+  line-height: 1.65;
+}
+.show-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+
+.show-jumps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 0;
+  margin: 0 0 22px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 64px;
+  z-index: 6;
+  background: linear-gradient(180deg, rgba(6, 7, 11, 0.97), rgba(6, 7, 11, 0.9));
+  backdrop-filter: blur(10px);
+}
+.show-jump {
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-dim);
+  font-size: 12.5px;
+  font-weight: 700;
+  transition: color var(--fast), border-color var(--fast), background var(--fast);
+}
+.show-jump:hover {
+  color: var(--ink);
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.show-season { margin: 0 0 34px; scroll-margin-top: 96px; }
+.show-season-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.show-season-title { margin: 0; font-size: 1.2rem; letter-spacing: -0.01em; }
+.show-season-sub { color: var(--ink-faint); font-size: 12px; font-weight: 650; }
+.show-episode-list { max-height: none; overflow: visible; }
+.show-season .episode { grid-template-columns: 44px 1fr 26px; }
+
+@media (max-width: 700px) {
+  .show-head { grid-template-columns: 1fr; }
+  .show-poster { width: 132px; }
+  .show-jumps { top: 58px; }
+  .show-season .episode { grid-template-columns: 34px 1fr; }
+  .show-season .episode-play { display: none; }
+}
 
 .episodes { margin-top: 30px; }
 

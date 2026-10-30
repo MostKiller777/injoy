@@ -27,6 +27,7 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - Opening a series plays it: the next-up episode starts immediately, no episode pick and no source pick. Next-up is the most recently watched episode, advanced to the following one when it was finished; a fresh show starts at S1E1. The panel stays open underneath, so closing playback lands back on the show.
 - Because playback opens over the detail sheet, the season browser also lives **inside the player**: an `S1E1`-style button in the control bar opens a drawer with every season as a tab and that season's episodes listed underneath, current episode marked. Choosing one swaps the stream in place — progress is written for the episode being left, the caption list is dropped, and the same player keeps playing.
 - The Mentalist leads the home Series row: 7 seasons, 151 episodes.
+- `#/show/tv:<id>` is a dedicated browse page: every season expanded at once, a season jump bar, no autoplay, and no player covering the list. The player's episode drawer links to it with **Open full series page**. The catalogue does not rely on that page to play an episode; it just makes all 151 rows reachable without fighting the video layer.
 
 **Playback**
 - One source, chosen by the server: the player never shows a picker and the visitor never downloads anything. `/api/play/:id` answers with a local copy when one exists, otherwise a direct stream - DASH, HLS or a progressive file - otherwise one embed.
