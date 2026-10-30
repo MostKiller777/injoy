@@ -48,19 +48,38 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.spli
 fi
 echo "   node $(node -v)"
 
-echo "== chrome =="
-# The resolver drives a real browser over the netlog: without Chrome the site
+echo "== browser =="
+# The resolver drives a real browser over the netlog: without one the site
 # still serves the catalog, but every play falls back to an embed.
-if ! command -v google-chrome >/dev/null 2>&1; then
-  install -d -m 0755 /etc/apt/keyrings
-  curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-    | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
-  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
-    > /etc/apt/sources.list.d/google-chrome.list
-  apt-get update -qq
-  apt-get install -y -qq google-chrome-stable >/dev/null
+have_browser() {
+  command -v google-chrome >/dev/null 2>&1 \
+    || command -v chromium >/dev/null 2>&1 \
+    || command -v chromium-browser >/dev/null 2>&1 \
+    || [ -x /snap/bin/chromium ]
+}
+
+if ! have_browser; then
+  if [ "$(uname -m)" = "x86_64" ]; then
+    install -d -m 0755 /etc/apt/keyrings
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+      | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
+      > /etc/apt/sources.list.d/google-chrome.list
+    apt-get update -qq
+    apt-get install -y -qq google-chrome-stable >/dev/null
+  else
+    # Oracle's Ampere A1 is ARM64, and Google does not publish a Linux ARM
+    # Chrome. Ubuntu's Chromium snap is the supported ARM browser; the resolver
+    # already looks for /snap/bin/chromium.
+    apt-get install -y -qq snapd >/dev/null || true
+    systemctl enable --now snapd.socket >/dev/null 2>&1 || true
+    if ! snap install chromium >/dev/null 2>&1; then
+      apt-get install -y -qq chromium-browser >/dev/null 2>&1 || true
+    fi
+  fi
 fi
-echo "   $(google-chrome --version 2>/dev/null || echo 'chrome missing')"
+BROWSER_VERSION="$(google-chrome --version 2>/dev/null || chromium --version 2>/dev/null || chromium-browser --version 2>/dev/null || /snap/bin/chromium --version 2>/dev/null || echo 'browser missing — embeds only')"
+echo "   $BROWSER_VERSION"
 
 echo "== user and directories =="
 id -u "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"

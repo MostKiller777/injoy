@@ -1,0 +1,35 @@
+#cloud-config
+# injoy - one-paste first-boot install.
+#
+# Oracle Cloud: Compute -> Instances -> Create instance -> Ubuntu 24.04 ->
+# Advanced options -> Management -> Cloud-init, paste this file, create.
+# Then open TCP 80 in the VCN security list. Nothing else is needed: no SSH,
+# no key upload, no push from your PC.
+#
+# The instance clones the public repository and runs deploy/bootstrap.sh, which
+# installs Node 22 and a headless browser, creates the injoy service, opens the
+# local firewall and starts the app on port 80. It comes back after a reboot.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - git
+  - curl
+  - ca-certificates
+
+write_files:
+  - path: /usr/local/bin/injoy-first-boot
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      rm -rf /tmp/injoy
+      git clone --depth 1 https://github.com/MostKiller777/injoy.git /tmp/injoy
+      bash /tmp/injoy/deploy/bootstrap.sh /tmp/injoy
+
+runcmd:
+  - [ bash, /usr/local/bin/injoy-first-boot ]
+
+final_message: "injoy first boot finished - open http://<this-host-public-ip>/"

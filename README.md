@@ -171,7 +171,11 @@ Registers a per-user scheduled task that runs `start.ps1` at every logon, restar
 
 **Running with this machine switched off**
 
-The tunnel publishes *this* PC. For a site that answers while the PC is off, put the same app on an always-on free VM — Oracle Cloud's Always Free tier gives 4 cores, 24 GB RAM, 200 GB of disk and 10 TB of egress a month, permanently, at no cost:
+The tunnel publishes *this* PC. For a site that answers while the PC is off, put the same app on an always-on free VM — Oracle Cloud's Always Free tier gives 4 cores, 24 GB RAM, 200 GB of disk and 10 TB of egress a month, permanently, at no cost.
+
+The fastest path is one paste: at instance creation open **Advanced options → Management → Cloud-init** and paste [`deploy/cloud-init.yaml`](deploy/cloud-init.yaml). The VM clones this public repo and provisions itself on first boot; no SSH key, no push, no process on this PC afterwards. Wait five to ten minutes and open `http://<public-ip>/`.
+
+`push.ps1` is the alternative and the update path once the VM exists:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy\push.ps1 -Server <public-ip> -Key <path-to-key>

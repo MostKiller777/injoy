@@ -26,6 +26,9 @@ const CHROME_CANDIDATES = [
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
+  // Ubuntu on ARM installs Chromium as a snap; Google does not ship a Linux
+  // ARM build of Chrome. The A1 shape is ARM, so this path matters.
+  '/snap/bin/chromium',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
 ];
 

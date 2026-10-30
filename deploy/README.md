@@ -41,7 +41,24 @@ always-on machine with the disk and the egress this app needs:
    ingress rule: source `0.0.0.0/0`, protocol `TCP`, destination port `80`.
 4. Copy the instance's **public IP**.
 
-### 2. Push the app
+### 2. One-paste install (no SSH, no key)
+
+At instance creation, open **Advanced options → Management → Cloud-init** and
+paste [`cloud-init.yaml`](cloud-init.yaml). Then create the instance and open
+TCP `80` in the VCN security list.
+
+That is the whole install. On first boot the instance clones this public
+repository, runs `deploy/bootstrap.sh`, installs Node 22 and a headless browser,
+creates the `injoy` service, opens the local firewall and starts the app on port
+80. No SSH key, no push from your PC, and no process on your PC afterwards.
+Wait five to ten minutes, then open `http://<public-ip>/`.
+
+- **Ampere A1 (ARM64):** the installer uses Ubuntu's Chromium snap; Google does
+  not publish a Linux ARM Chrome build.
+- **AMD micro (x86_64):** the installer uses Google Chrome. The catalog fits in
+  1 GB; the resolver is happier with 2 GB.
+
+### 3. Push the app (alternative, needs SSH)
 
 From this repo, on Windows:
 
@@ -60,7 +77,7 @@ an `injoy` service user, puts the app in `/opt/injoy`, its data in
 `-NoProvision` uploads without running anything, `-User root` is for hosts that
 do not have an `ubuntu` account, `-Port` changes the SSH port.
 
-### 3. It survives everything
+### 4. It survives everything
 
 ```bash
 systemctl status injoy      # running, enabled at boot
@@ -108,8 +125,9 @@ care whose machine it is.
 
 ## Notes
 
-- **Chrome is the resolver.** Without it `/api/play/:id` answers with an embed
-  and background caching is skipped. `bootstrap.sh` installs it.
+- **The browser is the resolver.** Without it `/api/play/:id` answers with an
+  embed and background caching is skipped. `bootstrap.sh` installs Google Chrome
+  on x86_64 and Ubuntu Chromium (snap) on ARM64; the resolver looks for both.
 - **Disk is the cache.** `MEDIA_CACHE_GB` (default 40) caps downloaded media;
   set it in `/etc/systemd/system/injoy.service` and `systemctl daemon-reload`.
 - **No auth layer.** The watchlist and progress endpoints are open. A public
