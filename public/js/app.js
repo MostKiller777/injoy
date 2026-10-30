@@ -8,9 +8,23 @@ import {
   subscribe,
   syncLibrary,
 } from './state.js';
-import { openPlayer } from './player.js';
 import * as ui from './ui.js';
 import { el } from './ui.js';
+
+// The player pulls in the DASH/HLS feeders and every control. None of that is
+// needed to paint the catalogue, so it is loaded on the first play instead of
+// on the first visit. The service worker caches it after that.
+let playerModule = null;
+function openPlayer(item) {
+  playerModule ??= import('./player.js');
+  return playerModule
+    .then((module) => module.openPlayer(item))
+    .catch((err) => {
+      console.error('[player] failed to load', err);
+      ui.toast('The player failed to load', 'warn');
+      return null;
+    });
+}
 
 const view = document.getElementById('view');
 const hero = document.getElementById('hero');

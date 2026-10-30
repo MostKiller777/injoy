@@ -491,7 +491,7 @@ async function handleApi(req, res, url) {
       res.writeHead(200, {
         'content-type': image.type,
         'content-length': image.buffer.length,
-        'cache-control': 'public, max-age=86400',
+        'cache-control': 'public, max-age=604800, immutable',
         ...SECURITY_HEADERS,
       });
       return req.method === 'HEAD' ? res.end() : res.end(image.buffer);

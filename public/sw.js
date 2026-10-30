@@ -1,5 +1,5 @@
 /* injoy service worker — shell cache only. API traffic always goes to the network. */
-const VERSION = 'injoy-v44';
+const VERSION = 'injoy-v45';
 const SHELL = [
   '/',
   '/index.html',
@@ -8,9 +8,9 @@ const SHELL = [
   '/js/api.js',
   '/js/state.js',
   '/js/ui.js',
-  '/js/player.js',
-  '/js/dash.js',
-  '/js/hls.js',
+  // player.js, dash.js and hls.js are loaded on the first play and cached by
+  // the fetch handler below. Prefetching them here made the first visit pay for
+  // a player most visitors have not opened yet.
   '/manifest.webmanifest',
   '/icon.svg',
 ];
