@@ -102,6 +102,12 @@ export const adminCustom = () =>
 export const adminRemove = (tmdbId) =>
   api('/api/admin/remove', { method: 'POST', body: { tmdbId }, timeout: 15_000, retries: 0 });
 
+export const agentDiagnose = () =>
+  api('/api/admin/agent', { timeout: 60_000, retries: 0 });
+
+export const agentFix = (ids = []) =>
+  api('/api/admin/agent/fix', { method: 'POST', body: { ids }, timeout: 90_000, retries: 0 });
+
 /** A new film must not hide behind the 60-second list memo. */
 export function invalidateCatalog() {
   memo.clear();

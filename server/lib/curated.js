@@ -1534,6 +1534,12 @@ export function removeCustomFilm(tmdbId) {
   return true;
 }
 
+/** Re-read the custom file after the doctor repairs it. */
+export function reloadCustomFilms() {
+  customFilms = loadCustomFilms();
+  rebuild();
+}
+
 /** The custom shelf, newest first, for the admin panel. */
 export function customFilmList() {
   return customFilms

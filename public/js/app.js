@@ -6,6 +6,8 @@ import {
   adminRemove,
   adminSearch,
   adminSession,
+  agentDiagnose,
+  agentFix,
   getBrowse,
   getDetail,
   getGenres,
@@ -704,6 +706,110 @@ async function renderAdminPanel(signal) {
     },
   }, 'Lock');
 
+  /* --------------------------- site doctor agent --------------------------- */
+
+  let doctorReport = null;
+  const doctorSummary = el('p', { class: 'doctor-summary', text: 'Not checked yet.' });
+  const doctorList = el('div', { class: 'doctor-list' });
+  const runButton = el('button', { class: 'btn btn-primary btn-mini', type: 'button' }, 'Run diagnosis');
+  const fixAllButton = el('button', { class: 'btn btn-ghost btn-mini', type: 'button', disabled: '' }, 'Fix everything fixable');
+  const copyButton = el('button', { class: 'btn btn-ghost btn-mini', type: 'button' }, 'Copy report');
+
+  const renderDoctor = (data) => {
+    doctorReport = data;
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    doctorSummary.textContent = `${plural(data.summary.total, 'check')} · ${data.summary.ok} ok · ${plural(data.summary.warn, 'warning')} · ${plural(data.summary.fail, 'failure')} · ${data.summary.fixable} fixable`;
+    doctorList.replaceChildren(...data.checks.map((check) => {
+      const fix = check.fixable && check.status !== 'ok'
+        ? el('button', {
+            class: 'btn btn-ghost btn-mini doctor-fix',
+            type: 'button',
+            on: {
+              click: (event) => {
+                event.currentTarget.disabled = true;
+                void fixOne(check.id);
+              },
+            },
+          }, 'Fix')
+        : null;
+      return el('div', { class: `doctor-row doctor-${check.status}` },
+        el('span', { class: 'doctor-status', text: check.status }),
+        el('div', { class: 'doctor-body' },
+          el('strong', { text: check.label }),
+          el('p', { text: check.detail }),
+        ),
+        fix,
+      );
+    }));
+    fixAllButton.disabled = data.summary.fixable === 0;
+  };
+
+  const fixOne = async (id) => {
+    try {
+      const result = await agentFix([id]);
+      invalidateCatalog();
+      await loadCustom();
+      renderDoctor(result.diagnosis);
+      ui.toast(`Fixed ${id}`);
+    } catch (err) {
+      if (err.status === 401) { renderAdmin(); return; }
+      doctorSummary.textContent = `Repair failed: ${err.message}`;
+    }
+  };
+
+  const fixAll = async () => {
+    fixAllButton.disabled = true;
+    fixAllButton.textContent = 'Fixing…';
+    try {
+      const result = await agentFix([]);
+      invalidateCatalog();
+      await loadCustom();
+      renderDoctor(result.diagnosis);
+      ui.toast(result.fixed.length ? `Fixed ${result.fixed.length} issue(s)` : 'Nothing needed fixing');
+    } catch (err) {
+      if (err.status === 401) { renderAdmin(); return; }
+      doctorSummary.textContent = `Repair failed: ${err.message}`;
+    } finally {
+      fixAllButton.textContent = 'Fix everything fixable';
+      fixAllButton.disabled = !doctorReport || doctorReport.summary.fixable === 0;
+    }
+  };
+
+  const runDoctor = async () => {
+    runButton.disabled = true;
+    runButton.textContent = 'Checking…';
+    doctorSummary.textContent = 'Checking server, catalogue, data files, images, captions and network…';
+    doctorList.replaceChildren();
+    try {
+      const data = await agentDiagnose();
+      if (signal?.aborted) return;
+      renderDoctor(data);
+    } catch (err) {
+      if (signal?.aborted) return;
+      if (err.status === 401) { renderAdmin(); return; }
+      doctorSummary.textContent = `Diagnosis failed: ${err.message}`;
+      fixAllButton.disabled = true;
+    } finally {
+      runButton.disabled = false;
+      runButton.textContent = 'Run diagnosis';
+    }
+  };
+
+  runButton.addEventListener('click', () => { void runDoctor(); });
+  fixAllButton.addEventListener('click', () => { void fixAll(); });
+  copyButton.addEventListener('click', async () => {
+    if (!doctorReport) {
+      ui.toast('Run a diagnosis first', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(doctorReport, null, 2));
+      ui.toast('Report copied');
+    } catch {
+      ui.toast('Clipboard is blocked in this browser', 'warn');
+    }
+  });
+
   view.append(
     pageHead('Admin', 'Type a movie name. The server finds it, adds it, and reloads the catalogue instantly.', [lock]),
     form,
@@ -712,10 +818,22 @@ async function renderAdminPanel(signal) {
     el('h2', { class: 'admin-section-title', text: 'Custom films' }),
     customList,
     el('p', { class: 'admin-foot', text: 'Entries are stored in data/custom-films.json. Removing one here removes it from the catalogue.' }),
+    el('section', { class: 'admin-doctor' },
+      el('div', { class: 'admin-doctor-head' },
+        el('div', {},
+          el('h2', { class: 'admin-section-title', text: 'Site doctor' }),
+          el('p', { class: 'admin-doctor-sub', text: 'Checks the running server, catalogue, data files, images, captions and network. Fixes only safe, known failures.' }),
+        ),
+        el('div', { class: 'admin-doctor-actions' }, runButton, fixAllButton, copyButton),
+      ),
+      doctorSummary,
+      doctorList,
+    ),
   );
 
   query.focus();
   void loadCustom();
+  void runDoctor();
 }
 
 /* -------------------------------- genres --------------------------------- */

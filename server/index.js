@@ -24,6 +24,7 @@ import { seriesStreamTarget } from './lib/series.js';
 import { subtitleTracks, subtitleVtt } from './lib/subtitles.js';
 import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFilm } from './lib/curated.js';
 import { filmFromImdb, searchMovies } from './lib/cinemeta.js';
+import { repair, runDiagnostics } from './lib/doctor.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 loadEnv(join(ROOT, '.env'));
@@ -621,6 +622,38 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/admin/logout' && method === 'POST') {
     res.setHeader('set-cookie', adminCookie(req, '', 0));
     return json(res, 200, { ok: true });
+  }
+
+  // admin agent: diagnose the running site, then repair known failures
+  if (pathname === '/api/admin/agent' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    try {
+      const diagnosis = await runDiagnostics({
+        cache,
+        admin: { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' },
+        publicDir: PUBLIC_DIR,
+      });
+      return json(res, 200, diagnosis);
+    } catch (err) {
+      return fail(res, 500, `diagnosis failed: ${err.message}`);
+    }
+  }
+
+  if (pathname === '/api/admin/agent/fix' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    try {
+      const body = await readBody(req);
+      const result = await repair({
+        ids: Array.isArray(body.ids) ? body.ids : [],
+        cache,
+        admin: { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' },
+        publicDir: PUBLIC_DIR,
+      });
+      cache.clear();
+      return json(res, 200, result);
+    } catch (err) {
+      return fail(res, 500, `repair failed: ${err.message}`);
+    }
   }
 
   // admin: type a name, add the film
