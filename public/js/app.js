@@ -51,7 +51,6 @@ const searchForm = document.getElementById('search-form');
 const searchInput = document.getElementById('search-input');
 const randomButton = document.getElementById('random-btn');
 const topbar = document.getElementById('topbar');
-const footerMode = document.getElementById('footer-mode');
 
 let baseRoute = '#/';
 let routeAbort = null;
@@ -242,7 +241,6 @@ async function renderHome(signal) {
     ));
 
     ui.clear(view).append(fragment);
-    if (footerMode) footerMode.textContent = 'curated catalog';
   } catch (err) {
     if (signal?.aborted) return;
     hero.hidden = true;
