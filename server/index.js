@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
-import { createReadStream } from 'node:fs';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createReadStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,38 @@ const PORT = Number(process.env.PORT || 6967);
 const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC_DIR = join(ROOT, 'public');
 const DATA_FILE = dataPath('library.json');
+
+/**
+ * Admin password.
+ *
+ * `ADMIN_KEY` in the environment wins. Otherwise a random password is made on
+ * first boot and kept in `data/admin-key.txt`; the panel is private without the
+ * user having to configure anything, and the password survives restarts.
+ */
+function loadAdminKey() {
+  const fromEnv = String(process.env.ADMIN_KEY ?? '').trim();
+  if (fromEnv) return fromEnv;
+
+  const file = dataPath('admin-key.txt');
+  try {
+    const saved = readFileSync(file, 'utf8').trim();
+    if (saved) return saved;
+  } catch {
+    // first boot
+  }
+
+  const key = randomBytes(24).toString('hex');
+  try {
+    mkdirSync(dataRoot(), { recursive: true });
+    writeFileSync(file, `${key}\n`, { mode: 0o600 });
+    console.log(`[admin] generated a private password in ${file}`);
+  } catch (err) {
+    console.warn(`[admin] could not save the password to ${file}: ${err.message}`);
+  }
+  return key;
+}
+
+const ADMIN_KEY = loadAdminKey();
 
 const cache = new Cache({ max: 1500, ttl: 60_000 });
 const imageCache = new Cache({ max: 320, ttl: 10 * 60_000 });
@@ -467,17 +500,44 @@ function miniItem(item) {
  * localhost install. A public host can set ADMIN_KEY in the service; the panel
  * sends it as `x-admin-key` and stores it in the browser.
  */
+const ADMIN_SESSION_MS = 24 * 60 * 60_000;
+const sha256 = (value) => createHash('sha256').update(String(value)).digest();
+const sameSecret = (a, b) => timingSafeEqual(sha256(a), sha256(b));
+
+/** A signed, expiring session cookie. The password is the signing key. */
+function adminToken() {
+  const expiry = Date.now() + ADMIN_SESSION_MS;
+  const signature = createHmac('sha256', ADMIN_KEY).update(String(expiry)).digest('hex');
+  return `${expiry}.${signature}`;
+}
+
+function adminCookie(req, value, maxAge) {
+  const forwarded = String(req.headers['x-forwarded-proto'] ?? '');
+  const secure = forwarded.includes('https') || Boolean(req.socket?.encrypted);
+  return `injoy_admin=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
+}
+
+function adminFromCookie(req) {
+  const raw = String(req.headers.cookie ?? '');
+  const match = /(?:^|;\s*)injoy_admin=([^;]+)/.exec(raw);
+  if (!match) return false;
+  let decoded;
+  try {
+    decoded = decodeURIComponent(match[1]);
+  } catch {
+    return false;
+  }
+  const [expiryText, signature] = decoded.split('.');
+  const expiry = Number(expiryText);
+  if (!Number.isFinite(expiry) || expiry < Date.now() || !signature) return false;
+  const expected = createHmac('sha256', ADMIN_KEY).update(String(expiry)).digest('hex');
+  return sameSecret(signature, expected);
+}
+
 function adminAllowed(req, url) {
-  const expected = String(process.env.ADMIN_KEY ?? '').trim();
-  const forwarded = String(req.headers['x-forwarded-for'] ?? '').trim();
-  const remote = String(req.socket?.remoteAddress ?? '');
-  const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
-  // No key: the panel is a localhost tool only. A tunnel or a public IP must
-  // set ADMIN_KEY, otherwise anyone who finds /api/admin/add can write the
-  // catalogue.
-  if (!expected) return loopback && !forwarded;
   const supplied = String(req.headers['x-admin-key'] ?? url.searchParams.get('key') ?? '');
-  return supplied === expected;
+  if (supplied) return sameSecret(supplied, ADMIN_KEY);
+  return adminFromCookie(req);
 }
 
 async function handleApi(req, res, url) {
@@ -536,6 +596,31 @@ async function handleApi(req, res, url) {
       dataDir: dataRoot(),
       version: '1.2.0',
     });
+  }
+
+  // admin authentication: password -> HttpOnly session cookie
+  if (pathname === '/api/admin/session' && method === 'GET') {
+    return json(res, 200, { authenticated: adminFromCookie(req) });
+  }
+
+  if (pathname === '/api/admin/login' && method === 'POST') {
+    try {
+      const body = await readBody(req);
+      if (!sameSecret(String(body.key ?? ''), ADMIN_KEY)) {
+        // A small fixed delay makes the endpoint a poor password oracle.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return fail(res, 401, 'wrong password');
+      }
+      res.setHeader('set-cookie', adminCookie(req, adminToken(), Math.floor(ADMIN_SESSION_MS / 1000)));
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return fail(res, 400, err.message);
+    }
+  }
+
+  if (pathname === '/api/admin/logout' && method === 'POST') {
+    res.setHeader('set-cookie', adminCookie(req, '', 0));
+    return json(res, 200, { ok: true });
   }
 
   // admin: type a name, add the film

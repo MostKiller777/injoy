@@ -1,8 +1,11 @@
 import {
   adminAdd,
   adminCustom,
+  adminLogin,
+  adminLogout,
   adminRemove,
   adminSearch,
+  adminSession,
   getBrowse,
   getDetail,
   getGenres,
@@ -464,30 +467,81 @@ async function renderShow(id, signal) {
 
 /* --------------------------------- admin --------------------------------- */
 
-/**
- * Type a movie name, pick the right result, press Add.
- *
- * The server does the rest: Cinemeta metadata, a custom-films.json record, a
- * catalogue rebuild and a cache clear. No restart, no code edit. The small key
- * field is for a public host that sets ADMIN_KEY; localhost does not need it.
- */
+/** Gate the panel behind the HttpOnly session cookie. */
 async function renderAdmin(signal) {
   hero.hidden = true;
   ui.clear(view);
 
-  const keyInput = el('input', {
-    class: 'admin-key', type: 'password', autocomplete: 'off', spellcheck: 'false',
-    placeholder: 'Admin key — only if the server sets ADMIN_KEY',
-    value: localStorage.getItem('injoy.adminKey') ?? '',
-    'aria-label': 'Admin key',
-  });
-  keyInput.addEventListener('input', () => {
-    const key = keyInput.value.trim();
-    if (key) localStorage.setItem('injoy.adminKey', key);
-    else localStorage.removeItem('injoy.adminKey');
-  });
-  keyInput.addEventListener('change', () => { void loadCustom(); });
+  let authenticated = false;
+  try {
+    authenticated = Boolean((await adminSession()).authenticated);
+  } catch {
+    // Server unreachable: show the login so the user can retry.
+  }
+  if (signal?.aborted) return;
+  if (authenticated) renderAdminPanel(signal);
+  else renderAdminLogin(signal);
+}
 
+function renderAdminLogin(signal) {
+  const password = el('input', {
+    class: 'admin-login-input',
+    type: 'password',
+    placeholder: 'Admin password',
+    autocomplete: 'current-password',
+    'aria-label': 'Admin password',
+  });
+  const button = el('button', { class: 'btn btn-primary', type: 'submit' }, 'Unlock');
+  const form = el('form', { class: 'admin-login-form' }, password, button);
+  const status = el('p', { class: 'admin-status' });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!password.value) {
+      status.textContent = 'Enter the admin password.';
+      return;
+    }
+    button.disabled = true;
+    status.textContent = 'Checking…';
+    try {
+      await adminLogin(password.value);
+      if (signal?.aborted) return;
+      password.value = '';
+      await renderAdmin(signal);
+    } catch (err) {
+      status.textContent = err.status === 401 ? 'Wrong password.' : `Could not sign in: ${err.message}`;
+      password.select();
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  view.append(
+    pageHead('Admin', 'Private panel. Sign in to add films.'),
+    el('div', { class: 'admin-login-card' },
+      el('p', { class: 'admin-login-copy' },
+        'The password is in ',
+        el('code', { text: 'data/admin-key.txt' }),
+        ' on this machine, or ',
+        el('code', { text: '/var/lib/injoy/admin-key.txt' }),
+        ' on a host. Set ',
+        el('code', { text: 'ADMIN_KEY' }),
+        ' to choose your own.'),
+      form,
+      status,
+      el('p', { class: 'admin-foot', text: 'The session lasts 24 hours. Closing the browser or pressing Lock signs out.' }),
+    ),
+  );
+  password.focus();
+}
+
+/**
+ * Type a movie name, pick the right result, press Add.
+ *
+ * The server does the rest: Cinemeta metadata, a custom-films.json record, a
+ * catalogue rebuild and a cache clear. No restart, no code edit.
+ */
+async function renderAdminPanel(signal) {
   const query = el('input', {
     class: 'admin-search', type: 'search', spellcheck: 'false',
     placeholder: 'Type a movie name…', 'aria-label': 'Movie name',
@@ -498,7 +552,6 @@ async function renderAdmin(signal) {
   const results = el('div', { class: 'admin-results' });
   const customList = el('div', { class: 'admin-custom' });
 
-  const key = () => keyInput.value.trim();
   const setStatus = (text, href = null, label = null) => {
     status.replaceChildren(el('span', { text }));
     if (href) {
@@ -513,7 +566,7 @@ async function renderAdmin(signal) {
     button.textContent = 'Adding…';
     setStatus(`Adding “${item.title}”…`);
     try {
-      const data = await adminAdd(item.imdbId, key());
+      const data = await adminAdd(item.imdbId);
       invalidateCatalog();
       await loadCustom();
       if (data.already) {
@@ -525,9 +578,11 @@ async function renderAdmin(signal) {
       if (data.item) button.textContent = data.already ? 'In catalogue' : 'Added';
       else button.textContent = 'Add';
     } catch (err) {
-      setStatus(err.status === 401
-        ? 'Admin key required. Set ADMIN_KEY on the server and paste it above.'
-        : `Could not add: ${err.message}`);
+      if (err.status === 401) {
+        renderAdmin();
+        return;
+      }
+      setStatus(`Could not add: ${err.message}`);
       button.disabled = false;
       button.textContent = 'Add';
     }
@@ -566,15 +621,17 @@ async function renderAdmin(signal) {
     setStatus(`Searching for “${term}”…`);
     results.replaceChildren();
     try {
-      const data = await adminSearch(term, key());
+      const data = await adminSearch(term);
       if (signal?.aborted) return;
       renderResults(data.results ?? []);
       if (data.results?.length) setStatus(`${data.results.length} results — pick the film, then Add.`);
     } catch (err) {
       if (signal?.aborted) return;
-      setStatus(err.status === 401
-        ? 'Admin key required. Set ADMIN_KEY on the server and paste it above.'
-        : `Search failed: ${err.message}`);
+      if (err.status === 401) {
+        renderAdmin();
+        return;
+      }
+      setStatus(`Search failed: ${err.message}`);
     } finally {
       submit.disabled = false;
     }
@@ -582,7 +639,7 @@ async function renderAdmin(signal) {
 
   async function loadCustom() {
     try {
-      const data = await adminCustom(key());
+      const data = await adminCustom();
       if (signal?.aborted) return;
       const items = data.items ?? [];
       customList.replaceChildren();
@@ -595,13 +652,17 @@ async function renderAdmin(signal) {
         remove.addEventListener('click', async () => {
           remove.disabled = true;
           try {
-            await adminRemove(item.tmdbId, key());
+            await adminRemove(item.tmdbId);
             invalidateCatalog();
             await loadCustom();
             setStatus(`Removed “${item.title}”.`);
             ui.toast(`Removed ${item.title}`);
           } catch (err) {
-            setStatus(err.status === 401 ? 'Admin key required.' : `Could not remove: ${err.message}`);
+            if (err.status === 401) {
+              renderAdmin();
+              return;
+            }
+            setStatus(`Could not remove: ${err.message}`);
             remove.disabled = false;
           }
         });
@@ -619,7 +680,11 @@ async function renderAdmin(signal) {
       }
     } catch (err) {
       if (signal?.aborted) return;
-      customList.replaceChildren(el('p', { class: 'admin-empty', text: err.status === 401 ? 'Admin key required to list custom films.' : `Could not load custom films: ${err.message}` }));
+      if (err.status === 401) {
+        renderAdmin();
+        return;
+      }
+      customList.replaceChildren(el('p', { class: 'admin-empty', text: `Could not load custom films: ${err.message}` }));
     }
   }
 
@@ -628,12 +693,19 @@ async function renderAdmin(signal) {
     void runSearch();
   });
 
+  const lock = el('button', {
+    class: 'btn btn-ghost btn-mini',
+    type: 'button',
+    on: {
+      click: async () => {
+        try { await adminLogout(); } catch { /* the cookie is gone either way */ }
+        renderAdmin();
+      },
+    },
+  }, 'Lock');
+
   view.append(
-    pageHead('Admin', 'Type a movie name. The server finds it, adds it, and reloads the catalogue instantly.'),
-    el('div', { class: 'admin-key-row' },
-      el('span', { class: 'admin-key-label', text: 'Admin key' }),
-      keyInput,
-    ),
+    pageHead('Admin', 'Type a movie name. The server finds it, adds it, and reloads the catalogue instantly.', [lock]),
     form,
     status,
     results,

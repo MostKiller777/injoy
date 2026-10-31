@@ -41,6 +41,7 @@ export async function api(path, { method = 'GET', body, timeout = 15_000, retrie
           : undefined,
         body: body ? JSON.stringify(body) : undefined,
         cache: 'no-store',
+        credentials: 'same-origin',
       });
 
       if (!res.ok) {
@@ -79,20 +80,27 @@ export const getBrowse = ({ page = 1, genre = '', sort = 'popular' } = {}, signa
 export const getGenres = () => api('/api/genres', { cacheable: true });
 export const getSeries = (signal) => api('/api/series', { signal, cacheable: true });
 
-/** Admin panel: search Cinemeta, add one film, list or remove custom films. */
-const adminHeaders = (key) => (key ? { 'x-admin-key': String(key) } : {});
+/** Admin panel: password session, Cinemeta search, add/list/remove films. */
+export const adminLogin = (key) =>
+  api('/api/admin/login', { method: 'POST', body: { key }, timeout: 15_000, retries: 0 });
 
-export const adminSearch = (q, key) =>
-  api(`/api/admin/search?q=${encodeURIComponent(q)}`, { headers: adminHeaders(key), timeout: 20_000, retries: 0 });
+export const adminLogout = () =>
+  api('/api/admin/logout', { method: 'POST', body: {}, timeout: 10_000, retries: 0 });
 
-export const adminAdd = (imdbId, key) =>
-  api('/api/admin/add', { method: 'POST', body: { imdbId }, headers: adminHeaders(key), timeout: 60_000, retries: 0 });
+export const adminSession = () =>
+  api('/api/admin/session', { timeout: 10_000, retries: 0 });
 
-export const adminCustom = (key) =>
-  api('/api/admin/custom', { headers: adminHeaders(key), timeout: 15_000, retries: 0 });
+export const adminSearch = (q) =>
+  api(`/api/admin/search?q=${encodeURIComponent(q)}`, { timeout: 20_000, retries: 0 });
 
-export const adminRemove = (tmdbId, key) =>
-  api('/api/admin/remove', { method: 'POST', body: { tmdbId }, headers: adminHeaders(key), timeout: 15_000, retries: 0 });
+export const adminAdd = (imdbId) =>
+  api('/api/admin/add', { method: 'POST', body: { imdbId }, timeout: 60_000, retries: 0 });
+
+export const adminCustom = () =>
+  api('/api/admin/custom', { timeout: 15_000, retries: 0 });
+
+export const adminRemove = (tmdbId) =>
+  api('/api/admin/remove', { method: 'POST', body: { tmdbId }, timeout: 15_000, retries: 0 });
 
 /** A new film must not hide behind the 60-second list memo. */
 export function invalidateCatalog() {

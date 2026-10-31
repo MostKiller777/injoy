@@ -130,8 +130,10 @@ care whose machine it is.
   on x86_64 and Ubuntu Chromium (snap) on ARM64; the resolver looks for both.
 - **Disk is the cache.** `MEDIA_CACHE_GB` (default 40) caps downloaded media;
   set it in `/etc/systemd/system/injoy.service` and `systemctl daemon-reload`.
-- **No auth layer.** The watchlist and progress endpoints are open. A public
-  deployment is a public deployment.
+- **Admin password.** `/api/admin/*` is protected by the password in
+  `/var/lib/injoy/admin-key.txt` (read it with `sudo cat`), or by `ADMIN_KEY` if
+  set in the service. The watchlist and progress endpoints remain open; a public
+  deployment is still a public deployment for those.
 - **Oracle idle reclaim.** Always Free instances that sit idle can be reclaimed
   after long inactivity; a site that serves traffic is not idle. Upgrading the
   account to pay-as-you-go removes the policy entirely and still bills nothing
