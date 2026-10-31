@@ -108,6 +108,9 @@ export const agentDiagnose = () =>
 export const agentFix = (ids = []) =>
   api('/api/admin/agent/fix', { method: 'POST', body: { ids }, timeout: 90_000, retries: 0 });
 
+export const agentChat = (message, context = {}) =>
+  api('/api/admin/chat', { method: 'POST', body: { message, context }, timeout: 90_000, retries: 0 });
+
 /** A new film must not hide behind the 60-second list memo. */
 export function invalidateCatalog() {
   memo.clear();

@@ -1993,6 +1993,76 @@ kbd {
 .admin-empty { color: var(--ink-faint); font-size: 12.5px; padding: 8px 2px; }
 .admin-foot { color: var(--ink-faint); font-size: 11.5px; margin-top: 18px; }
 
+.agent-chat-card {
+  margin: 8px 0 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: rgba(255, 255, 255, 0.025);
+}
+.agent-chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.agent-chat-title { margin: 0; font-size: 16px; letter-spacing: -0.01em; }
+.agent-chat-sub { margin: 3px 0 0; color: var(--ink-faint); font-size: 12px; line-height: 1.5; }
+.agent-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 14px 0 10px;
+  padding-right: 4px;
+  scroll-behavior: smooth;
+}
+.agent-msg { display: flex; }
+.agent-msg.user { justify-content: flex-end; }
+.agent-bubble {
+  max-width: 82%;
+  padding: 9px 12px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.agent-msg.agent .agent-bubble {
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+  color: var(--ink-dim);
+}
+.agent-msg.user .agent-bubble {
+  background: var(--acc);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.agent-link { color: var(--acc-2); font-weight: 750; white-space: nowrap; }
+.agent-msg.user .agent-link { color: #fff; }
+.agent-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.agent-chip {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.03);
+}
+.agent-chip:hover { color: var(--ink); border-color: rgba(255, 255, 255, 0.28); }
+.agent-form { display: flex; gap: 8px; }
+.agent-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.agent-input:focus { outline: none; border-color: var(--acc-2); background: rgba(255, 255, 255, 0.09); }
+.agent-input::placeholder { color: var(--ink-faint); }
+
 .admin-doctor { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); }
 .admin-doctor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .admin-doctor .admin-section-title { margin: 0 0 4px; }

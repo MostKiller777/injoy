@@ -6,6 +6,7 @@ import {
   adminRemove,
   adminSearch,
   adminSession,
+  agentChat,
   agentDiagnose,
   agentFix,
   getBrowse,
@@ -810,8 +811,85 @@ async function renderAdminPanel(signal) {
     }
   });
 
+  /* -------------------------------- chat --------------------------------- */
+
+  const chatMessages = el('div', { class: 'agent-messages', role: 'log', 'aria-live': 'polite' });
+  const chatInput = el('input', {
+    class: 'agent-input',
+    type: 'text',
+    placeholder: 'Ask the agent…',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    'aria-label': 'Message the agent',
+  });
+  const chatSend = el('button', { class: 'btn btn-primary btn-mini', type: 'submit' }, 'Send');
+  const chatForm = el('form', { class: 'agent-form' }, chatInput, chatSend);
+  const chatChips = el('div', { class: 'agent-suggestions' });
+  let chatContext = {};
+
+  const appendMessage = (role, text, link = null) => {
+    const bubble = el('div', { class: 'agent-bubble' }, el('span', { text: String(text ?? '') }));
+    if (link) bubble.append(' ', el('a', { class: 'agent-link', href: link, text: 'Open' }));
+    const row = el('div', { class: `agent-msg ${role}` }, bubble);
+    chatMessages.append(row);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return row;
+  };
+
+  const sendAgent = async (text) => {
+    const message = String(text ?? chatInput.value).trim();
+    if (!message) return;
+    appendMessage('user', message);
+    chatInput.value = '';
+    chatSend.disabled = true;
+    const thinking = appendMessage('agent', 'Working…');
+    try {
+      const data = await agentChat(message, chatContext);
+      chatContext = data.context ?? {};
+      thinking.remove();
+      appendMessage('agent', data.reply ?? 'Done.', data.link ?? null);
+      if (data.refresh) {
+        invalidateCatalog();
+        await loadCustom();
+        void runDoctor();
+      }
+    } catch (err) {
+      thinking.remove();
+      if (err.status === 401) { renderAdmin(); return; }
+      appendMessage('agent', `Error: ${err.message}`);
+    } finally {
+      chatSend.disabled = false;
+      chatInput.focus();
+    }
+  };
+
+  chatForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void sendAgent();
+  });
+
+  for (const label of ['Check the site', 'Fix everything', 'Stats', 'Search The Matrix', 'Custom films', 'Logs', 'Help']) {
+    chatChips.append(el('button', {
+      class: 'agent-chip', type: 'button',
+      on: { click: () => { void sendAgent(label); } },
+    }, label));
+  }
+
+  appendMessage('agent', 'I can check and fix the site, add or remove films, show stats, logs and backups. What do you need?');
+
   view.append(
     pageHead('Admin', 'Type a movie name. The server finds it, adds it, and reloads the catalogue instantly.', [lock]),
+    el('section', { class: 'agent-chat-card' },
+      el('div', { class: 'agent-chat-head' },
+        el('div', {},
+          el('h2', { class: 'agent-chat-title', text: 'Agent chat' }),
+          el('p', { class: 'agent-chat-sub', text: 'Ask about the site, or tell it what to check, fix, add or remove.' }),
+        ),
+      ),
+      chatMessages,
+      chatChips,
+      chatForm,
+    ),
     form,
     status,
     results,
@@ -831,7 +909,7 @@ async function renderAdminPanel(signal) {
     ),
   );
 
-  query.focus();
+  chatInput.focus();
   void loadCustom();
   void runDoctor();
 }

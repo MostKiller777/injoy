@@ -25,6 +25,7 @@ import { subtitleTracks, subtitleVtt } from './lib/subtitles.js';
 import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFilm } from './lib/curated.js';
 import { filmFromImdb, searchMovies } from './lib/cinemeta.js';
 import { repair, runDiagnostics } from './lib/doctor.js';
+import { agentChat } from './lib/agent-chat.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 loadEnv(join(ROOT, '.env'));
@@ -653,6 +654,23 @@ async function handleApi(req, res, url) {
       return json(res, 200, result);
     } catch (err) {
       return fail(res, 500, `repair failed: ${err.message}`);
+    }
+  }
+
+  if (pathname === '/api/admin/chat' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    try {
+      const body = await readBody(req);
+      const result = await agentChat({
+        message: body.message,
+        context: body.context,
+        cache,
+        admin: { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' },
+        publicDir: PUBLIC_DIR,
+      });
+      return json(res, 200, result);
+    } catch (err) {
+      return fail(res, 500, `agent failed: ${err.message}`);
     }
   }
 
