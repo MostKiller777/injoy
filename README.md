@@ -150,6 +150,36 @@ With a key, detail pages for those same ids pull live TMDB metadata (cast, crew,
 
 ---
 
+## Admin and the AI agents
+
+`/admin` is gated by a password — `ADMIN_KEY` in `.env`, or a generated key written to `data/admin-key.txt` if you never set one. The session is an HttpOnly, SameSite=Strict cookie valid 24 hours. Every `/api/admin/*` route checks it; a plain `curl` gets `401`.
+
+Two agents live behind that gate:
+
+- **Agent chat** (`#/admin`) — checks the site, reads logs, searches, adds and removes films, runs the 20-point doctor.
+- **Code agent** (`#/admin/code`) — lists, reads and searches the repo, explains it, finds bugs, and proposes **complete-file edits with a diff**. It never writes. You press **Apply**; the old file is backed up to `data/backups/code/<timestamp>/` first, and a failed `node --check` or `JSON.parse` rolls the file straight back. `Reject` discards the proposal.
+
+Both chats persist in `localStorage` (`injoy.adminChat.v1`, `injoy.codeChat.v1`) across reloads; `Clear` in the card header wipes them. Asking about a path, a file or a search answers straight from the filesystem in single-digit milliseconds — the model only handles change and explanation.
+
+**The model is free and local by default.** Install [Ollama](https://ollama.com), then:
+
+```bash
+ollama pull qwen2.5-coder:7b
+```
+
+```bash
+# .env
+AI_API_KEY=ollama
+AI_BASE_URL=http://127.0.0.1:11434/v1
+AI_MODEL=qwen2.5-coder:7b
+```
+
+Any OpenAI-compatible endpoint works instead — the same three variables, a real key, `https://api.openai.com/v1`, `gpt-4o-mini`. Settings can also be saved at runtime from **Admin → AI settings** into `data/ai.json`, which wins over `.env`. `qwen2.5-coder:3b` and `1.5b` fit machines the 7b does not.
+
+On an always-on host, `deploy/ollama.sh` does all of the above and sizes the model to the VM. `deploy/cloud-init.yaml` already calls it.
+
+---
+
 ## Publish
 
 The app is a single Node process with no dependencies, so every host that can run a container can run it. The image is the repo — there is no build step.
@@ -214,6 +244,8 @@ Registers a per-user scheduled task that runs `start.ps1` at every logon, restar
 The tunnel publishes *this* PC. For a site that answers while the PC is off, put the same app on an always-on free VM — Oracle Cloud's Always Free tier gives 4 cores, 24 GB RAM, 200 GB of disk and 10 TB of egress a month, permanently, at no cost.
 
 The fastest path is one paste: at instance creation open **Advanced options → Management → Cloud-init** and paste [`deploy/cloud-init.yaml`](deploy/cloud-init.yaml). The VM clones this public repo and provisions itself on first boot; no SSH key, no push, no process on this PC afterwards. Wait five to ten minutes and open `http://<public-ip>/`.
+
+That same paste also installs **Ollama** and sizes a local Qwen coder model to the VM's RAM (`7b` on the 24 GB shape, `3b` at 6 GB, `1.5b` below that), then points the app at it. The admin chat and the code agent work with the PC switched off, with no API key and no bill. If the model step fails the site still boots and falls back to the built-in command agent.
 
 `push.ps1` is the alternative and the update path once the VM exists:
 
@@ -292,6 +324,7 @@ injoy/
     bin/cloudflared.exe fetched on first run
   deploy/
     bootstrap.sh        provision an always-on Ubuntu host: node, chrome, systemd
+    ollama.sh           free local model on the host, sized to its RAM
     push.ps1            pack this checkout, scp it, run bootstrap over ssh
     README.md           the free-forever host walkthrough
   scripts/
@@ -311,6 +344,14 @@ injoy/
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | uptime, mode, cache stats, library counts |
+| POST | `/api/admin/login` | `{ key }` → session cookie |
+| POST | `/api/admin/logout` | drop the session |
+| GET | `/api/admin/session` | `{ authenticated, ai, model, baseUrl, source }` |
+| POST | `/api/admin/chat` | `{ message, context, history }` → site agent reply |
+| GET/POST | `/api/admin/ai` | read or save provider settings (`data/ai.json`) |
+| POST | `/api/admin/code/chat` | `{ message, history }` → reply plus proposed edits |
+| POST | `/api/admin/code/apply` | `{ id }` → backup, write, syntax check, roll back on failure |
+| POST | `/api/admin/code/reject` | `{ id }` → discard a proposal |
 | GET | `/api/home` | hero + every rail (10 min cache) |
 | GET | `/api/series` | every show with season and episode counts |
 | GET | `/api/search?q=&page=` | films and series, title-ranked |
@@ -350,7 +391,7 @@ injoy/
 - The catalog is static metadata files on purpose: TMDB's API needs a key, its image CDN does not, so the site keeps a complete, playable front page with zero configuration. TVMaze is keyless, which is why the series shelf is built from it.
 - `data/library.json` and `data/media.json` are the only mutable state. Delete them to reset the library and the download index; `data/media/` holds the files themselves.
 - CSP allows `frame-src https:` and `img-src https:` because embeds and artwork are external. Scripts stay same-origin.
-- To expose the app beyond localhost, set `HOST=0.0.0.0` — there is no auth layer, so keep it on your LAN or put it behind a proxy.
+- To expose the app beyond localhost, set `HOST=0.0.0.0`. The catalogue is public; `/admin` and every `/api/admin/*` route need the password session. Put a real proxy in front if you want TLS.
 
 ---
 

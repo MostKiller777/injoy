@@ -28,8 +28,11 @@ write_files:
       rm -rf /tmp/injoy
       git clone --depth 1 https://github.com/MostKiller777/injoy.git /tmp/injoy
       bash /tmp/injoy/deploy/bootstrap.sh /tmp/injoy
+      # Free local AI. Non-fatal: the site keeps serving even on the 1 GB
+      # shapes where a coder model is too heavy.
+      bash /tmp/injoy/deploy/ollama.sh || echo "ollama step failed - site is fine, AI uses the built-in command agent"
 
 runcmd:
   - [ bash, /usr/local/bin/injoy-first-boot ]
 
-final_message: "injoy first boot finished - open http://<this-host-public-ip>/"
+final_message: "injoy first boot finished - open http://<this-host-public-ip>/ on port 80, admin password in /var/lib/injoy/admin-key.txt"
