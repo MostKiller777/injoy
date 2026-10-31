@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import { embedSources } from './providers.js';
 import { imgProxy } from './images.js';
@@ -1398,40 +1399,43 @@ const BASE_FILMS = [
 /**
  * Optional films added without editing the source.
  *
- * `data/custom-films.json` (or `$DATA_DIR/custom-films.json`) is read once at
- * startup. The file is an array of records; a custom record with the same TMDB
+ * `data/custom-films.json` (or `$DATA_DIR/custom-films.json`) is the admin
+ * panel's storage and the hand-edit format. A custom record with the same TMDB
  * id as a built-in one wins. Invalid JSON is logged and ignored, so a typo
  * cannot take the catalogue down.
  */
+function normalizeCustomRecord(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const tmdbId = Number(raw.tmdbId ?? String(raw.id ?? '').replace(/^tmdb:/i, ''));
+  const title = String(raw.title ?? '').trim();
+  if (!Number.isFinite(tmdbId) || tmdbId <= 0 || !title) return null;
+  const year = Number(raw.year) || null;
+  const runtime = Number(raw.runtime);
+  return {
+    ...raw,
+    tmdbId,
+    title,
+    year,
+    release: String(raw.release ?? (year ? `${year}-01-01` : '1970-01-01')),
+    overview: String(raw.overview ?? ''),
+    genres: Array.isArray(raw.genres) ? raw.genres.filter((genre) => typeof genre === 'string') : [],
+    rating: Number.isFinite(Number(raw.rating)) ? Number(raw.rating) : null,
+    runtime: Number.isFinite(runtime) ? runtime : null,
+    posterUrl: raw.posterUrl ?? raw.poster ?? raw.posterPath ?? null,
+    backdropUrl: raw.backdropUrl ?? raw.backdrop ?? raw.backdropPath ?? null,
+    cast: Array.isArray(raw.cast) ? raw.cast : [],
+    production: Array.isArray(raw.production) ? raw.production : [],
+    featured: Boolean(raw.featured),
+  };
+}
+
 function loadCustomFilms() {
   const file = dataPath('custom-films.json');
   if (!existsSync(file)) return [];
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'));
     const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.films) ? parsed.films : [];
-    const films = [];
-    for (const raw of list) {
-      if (!raw || typeof raw !== 'object') continue;
-      const tmdbId = Number(raw.tmdbId ?? String(raw.id ?? '').replace(/^tmdb:/i, ''));
-      const title = String(raw.title ?? '').trim();
-      if (!Number.isFinite(tmdbId) || tmdbId <= 0 || !title) continue;
-      const year = Number(raw.year) || null;
-      films.push({
-        ...raw,
-        tmdbId,
-        title,
-        year,
-        release: String(raw.release ?? (year ? `${year}-01-01` : '1970-01-01')),
-        overview: String(raw.overview ?? ''),
-        genres: Array.isArray(raw.genres) ? raw.genres.filter((genre) => typeof genre === 'string') : [],
-        rating: Number.isFinite(Number(raw.rating)) ? Number(raw.rating) : null,
-        runtime: Number.isFinite(Number(raw.runtime)) ? Number(raw.runtime) : null,
-        posterUrl: raw.posterUrl ?? raw.poster ?? raw.posterPath ?? null,
-        backdropUrl: raw.backdropUrl ?? raw.backdrop ?? raw.backdropPath ?? null,
-        cast: Array.isArray(raw.cast) ? raw.cast : [],
-        production: Array.isArray(raw.production) ? raw.production : [],
-      });
-    }
+    const films = list.map(normalizeCustomRecord).filter(Boolean);
     if (films.length) console.log(`[curated] ${films.length} custom film(s) loaded from ${file}`);
     return films;
   } catch (err) {
@@ -1440,10 +1444,17 @@ function loadCustomFilms() {
   }
 }
 
-const FILMS = (() => {
+let customFilms = loadCustomFilms();
+let FILMS = [];
+let ITEMS = [];
+export let CURATED_ITEMS = [];
+let FEATURED = [];
+let BY_ID = new Map();
+
+function rebuild() {
   const seen = new Map();
   for (const film of [
-    ...loadCustomFilms(),
+    ...customFilms,
     ...BASE_FILMS,
     ...EXTRA_FILMS,
     ...MORE_FILMS,
@@ -1454,8 +1465,12 @@ const FILMS = (() => {
     if (!Number.isFinite(id) || seen.has(id)) continue;
     seen.set(id, film);
   }
-  return [...seen.values()];
-})();
+  FILMS = [...seen.values()];
+  ITEMS = FILMS.map(normalize);
+  CURATED_ITEMS = [...ITEMS].sort((a, b) => String(b.release).localeCompare(String(a.release)));
+  FEATURED = FILMS.filter((film) => film.featured).map((film) => film.tmdbId);
+  BY_ID = new Map(ITEMS.map((item) => [item.tmdbId, item]));
+}
 
 function normalize(film) {
   return {
@@ -1480,14 +1495,54 @@ function normalize(film) {
   };
 }
 
-const ITEMS = FILMS.map(normalize);
+function writeCustomFilms() {
+  const file = dataPath('custom-films.json');
+  const payload = customFilms.map((film) => ({
+    tmdbId: film.tmdbId,
+    title: film.title,
+    year: film.year,
+    release: film.release,
+    runtime: film.runtime,
+    rating: film.rating,
+    genres: film.genres,
+    overview: film.overview,
+    poster: film.posterUrl,
+    backdrop: film.backdropUrl,
+    featured: Boolean(film.featured),
+  }));
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+}
 
-/** Newest first — the order the home shelf and the "newest" sort use. */
-export const CURATED_ITEMS = [...ITEMS].sort((a, b) => String(b.release).localeCompare(String(a.release)));
+/** Add or replace one custom film and make it visible without a restart. */
+export function addCustomFilm(raw) {
+  const film = normalizeCustomRecord(raw);
+  if (!film) throw Object.assign(new Error('invalid film record'), { status: 400 });
+  customFilms = [film, ...customFilms.filter((entry) => entry.tmdbId !== film.tmdbId)];
+  writeCustomFilms();
+  rebuild();
+  return BY_ID.get(film.tmdbId) ?? null;
+}
 
-const FEATURED = FILMS.filter((film) => film.featured).map((film) => film.tmdbId);
+export function removeCustomFilm(tmdbId) {
+  const id = Number(tmdbId);
+  const before = customFilms.length;
+  customFilms = customFilms.filter((film) => film.tmdbId !== id);
+  if (customFilms.length === before) return false;
+  writeCustomFilms();
+  rebuild();
+  return true;
+}
 
-const BY_ID = new Map(ITEMS.map((item) => [item.tmdbId, item]));
+/** The custom shelf, newest first, for the admin panel. */
+export function customFilmList() {
+  return customFilms
+    .map((film) => BY_ID.get(film.tmdbId))
+    .filter(Boolean)
+    .sort((a, b) => String(b.release).localeCompare(String(a.release)));
+}
+
+rebuild();
 
 const normalizeName = (value) => String(value ?? '')
   .toLowerCase()

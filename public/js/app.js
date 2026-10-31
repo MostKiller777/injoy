@@ -1,4 +1,17 @@
-import { getBrowse, getDetail, getGenres, getHome, getRandom, getSearch, getSeries } from './api.js';
+import {
+  adminAdd,
+  adminCustom,
+  adminRemove,
+  adminSearch,
+  getBrowse,
+  getDetail,
+  getGenres,
+  getHome,
+  getRandom,
+  getSearch,
+  getSeries,
+  invalidateCatalog,
+} from './api.js';
 import {
   continueCount,
   listItems,
@@ -155,7 +168,7 @@ function route() {
   const params = new URLSearchParams(query ?? '');
   setActiveNav(path);
 
-  const titles = { '/films': 'Films', '/series': 'Series', '/genres': 'Genres', '/list': 'My list', '/search': 'Search' };
+  const titles = { '/films': 'Films', '/series': 'Series', '/genres': 'Genres', '/list': 'My list', '/search': 'Search', '/admin': 'Admin' };
   document.title = path === '/search' && params.get('q')
     ? `${params.get('q')} — Injoy`
     : `${titles[path] ?? 'Watch everything'} — Injoy`;
@@ -172,6 +185,7 @@ function route() {
   if (path === '/genres') return renderGenres(controller.signal);
   if (path === '/list') return renderList();
   if (path === '/search') return renderSearch(params.get('q') ?? '', controller.signal);
+  if (path === '/admin') return renderAdmin(controller.signal);
   return renderHome(controller.signal);
 }
 
@@ -446,6 +460,190 @@ async function renderShow(id, signal) {
     jumps,
     ...(sections.length ? sections : [ui.emptyState({ title: 'No episodes', message: 'This series has no episode list yet.' })]),
   );
+}
+
+/* --------------------------------- admin --------------------------------- */
+
+/**
+ * Type a movie name, pick the right result, press Add.
+ *
+ * The server does the rest: Cinemeta metadata, a custom-films.json record, a
+ * catalogue rebuild and a cache clear. No restart, no code edit. The small key
+ * field is for a public host that sets ADMIN_KEY; localhost does not need it.
+ */
+async function renderAdmin(signal) {
+  hero.hidden = true;
+  ui.clear(view);
+
+  const keyInput = el('input', {
+    class: 'admin-key', type: 'password', autocomplete: 'off', spellcheck: 'false',
+    placeholder: 'Admin key — only if the server sets ADMIN_KEY',
+    value: localStorage.getItem('injoy.adminKey') ?? '',
+    'aria-label': 'Admin key',
+  });
+  keyInput.addEventListener('input', () => {
+    const key = keyInput.value.trim();
+    if (key) localStorage.setItem('injoy.adminKey', key);
+    else localStorage.removeItem('injoy.adminKey');
+  });
+  keyInput.addEventListener('change', () => { void loadCustom(); });
+
+  const query = el('input', {
+    class: 'admin-search', type: 'search', spellcheck: 'false',
+    placeholder: 'Type a movie name…', 'aria-label': 'Movie name',
+  });
+  const submit = el('button', { class: 'btn btn-primary', type: 'submit' }, 'Search');
+  const form = el('form', { class: 'admin-search-form' }, query, submit);
+  const status = el('p', { class: 'admin-status' });
+  const results = el('div', { class: 'admin-results' });
+  const customList = el('div', { class: 'admin-custom' });
+
+  const key = () => keyInput.value.trim();
+  const setStatus = (text, href = null, label = null) => {
+    status.replaceChildren(el('span', { text }));
+    if (href) {
+      status.append(
+        el('a', { class: 'admin-status-link', href, text: label ?? 'Open' }),
+      );
+    }
+  };
+
+  const addFilm = async (item, button) => {
+    button.disabled = true;
+    button.textContent = 'Adding…';
+    setStatus(`Adding “${item.title}”…`);
+    try {
+      const data = await adminAdd(item.imdbId, key());
+      invalidateCatalog();
+      await loadCustom();
+      if (data.already) {
+        setStatus(`“${item.title}” is already in the catalogue.`, `#/movie/${encodeURIComponent(data.item.id)}`, 'Open it');
+      } else {
+        setStatus(`“${item.title}” added.`, `#/movie/${encodeURIComponent(data.item.id)}`, 'Watch it');
+        ui.toast(`Added ${item.title}`);
+      }
+      if (data.item) button.textContent = data.already ? 'In catalogue' : 'Added';
+      else button.textContent = 'Add';
+    } catch (err) {
+      setStatus(err.status === 401
+        ? 'Admin key required. Set ADMIN_KEY on the server and paste it above.'
+        : `Could not add: ${err.message}`);
+      button.disabled = false;
+      button.textContent = 'Add';
+    }
+  };
+
+  const renderResults = (items) => {
+    results.replaceChildren();
+    if (!items.length) {
+      setStatus('No match. Try a shorter title or the year.');
+      return;
+    }
+    for (const item of items) {
+      const button = el('button', {
+        class: 'btn btn-primary btn-mini', type: 'button',
+      }, 'Add');
+      button.addEventListener('click', () => { void addFilm(item, button); });
+      results.append(el('article', { class: 'admin-result' },
+        item.poster ? el('img', { class: 'admin-result-poster', src: item.poster, alt: '', loading: 'lazy' }) : null,
+        el('div', { class: 'admin-result-info' },
+          el('h3', { text: item.title }),
+          el('p', { class: 'admin-result-meta', text: [item.year, item.rating ? `${item.rating} / 10` : null].filter(Boolean).join(' · ') || '—' }),
+          item.overview ? el('p', { class: 'admin-result-overview', text: item.overview }) : null,
+        ),
+        button,
+      ));
+    }
+  };
+
+  const runSearch = async () => {
+    const term = query.value.trim();
+    if (term.length < 2) {
+      setStatus('Type at least two characters.');
+      return;
+    }
+    submit.disabled = true;
+    setStatus(`Searching for “${term}”…`);
+    results.replaceChildren();
+    try {
+      const data = await adminSearch(term, key());
+      if (signal?.aborted) return;
+      renderResults(data.results ?? []);
+      if (data.results?.length) setStatus(`${data.results.length} results — pick the film, then Add.`);
+    } catch (err) {
+      if (signal?.aborted) return;
+      setStatus(err.status === 401
+        ? 'Admin key required. Set ADMIN_KEY on the server and paste it above.'
+        : `Search failed: ${err.message}`);
+    } finally {
+      submit.disabled = false;
+    }
+  };
+
+  async function loadCustom() {
+    try {
+      const data = await adminCustom(key());
+      if (signal?.aborted) return;
+      const items = data.items ?? [];
+      customList.replaceChildren();
+      if (!items.length) {
+        customList.append(el('p', { class: 'admin-empty', text: 'No custom films yet. Search above and press Add.' }));
+        return;
+      }
+      for (const item of items) {
+        const remove = el('button', { class: 'btn btn-ghost btn-mini', type: 'button' }, 'Remove');
+        remove.addEventListener('click', async () => {
+          remove.disabled = true;
+          try {
+            await adminRemove(item.tmdbId, key());
+            invalidateCatalog();
+            await loadCustom();
+            setStatus(`Removed “${item.title}”.`);
+            ui.toast(`Removed ${item.title}`);
+          } catch (err) {
+            setStatus(err.status === 401 ? 'Admin key required.' : `Could not remove: ${err.message}`);
+            remove.disabled = false;
+          }
+        });
+        customList.append(el('div', { class: 'admin-row' },
+          item.poster ? el('img', { class: 'admin-row-poster', src: item.poster, alt: '', loading: 'lazy' }) : null,
+          el('div', { class: 'admin-row-info' },
+            el('strong', { text: item.title }),
+            el('span', { text: `${item.year ?? '—'} · ${item.id}` }),
+          ),
+          el('div', { class: 'admin-row-actions' },
+            el('a', { class: 'btn btn-ghost btn-mini', href: `#/movie/${encodeURIComponent(item.id)}`, text: 'Open' }),
+            remove,
+          ),
+        ));
+      }
+    } catch (err) {
+      if (signal?.aborted) return;
+      customList.replaceChildren(el('p', { class: 'admin-empty', text: err.status === 401 ? 'Admin key required to list custom films.' : `Could not load custom films: ${err.message}` }));
+    }
+  }
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void runSearch();
+  });
+
+  view.append(
+    pageHead('Admin', 'Type a movie name. The server finds it, adds it, and reloads the catalogue instantly.'),
+    el('div', { class: 'admin-key-row' },
+      el('span', { class: 'admin-key-label', text: 'Admin key' }),
+      keyInput,
+    ),
+    form,
+    status,
+    results,
+    el('h2', { class: 'admin-section-title', text: 'Custom films' }),
+    customList,
+    el('p', { class: 'admin-foot', text: 'Entries are stored in data/custom-films.json. Removing one here removes it from the catalogue.' }),
+  );
+
+  query.focus();
+  void loadCustom();
 }
 
 /* -------------------------------- genres --------------------------------- */

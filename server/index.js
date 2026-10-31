@@ -21,6 +21,8 @@ import { dashSession, readDashSegment } from './lib/dashstore.js';
 import { hlsSession, readLocalHlsSegment } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
 import { subtitleTracks, subtitleVtt } from './lib/subtitles.js';
+import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFilm } from './lib/curated.js';
+import { filmFromImdb, searchMovies } from './lib/cinemeta.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 loadEnv(join(ROOT, '.env'));
@@ -458,6 +460,26 @@ function miniItem(item) {
   };
 }
 
+/**
+ * Admin guard.
+ *
+ * With no `ADMIN_KEY` the panel is open, which is the right default for a
+ * localhost install. A public host can set ADMIN_KEY in the service; the panel
+ * sends it as `x-admin-key` and stores it in the browser.
+ */
+function adminAllowed(req, url) {
+  const expected = String(process.env.ADMIN_KEY ?? '').trim();
+  const forwarded = String(req.headers['x-forwarded-for'] ?? '').trim();
+  const remote = String(req.socket?.remoteAddress ?? '');
+  const loopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  // No key: the panel is a localhost tool only. A tunnel or a public IP must
+  // set ADMIN_KEY, otherwise anyone who finds /api/admin/add can write the
+  // catalogue.
+  if (!expected) return loopback && !forwarded;
+  const supplied = String(req.headers['x-admin-key'] ?? url.searchParams.get('key') ?? '');
+  return supplied === expected;
+}
+
 async function handleApi(req, res, url) {
   const { pathname, searchParams } = url;
   const method = req.method ?? 'GET';
@@ -514,6 +536,65 @@ async function handleApi(req, res, url) {
       dataDir: dataRoot(),
       version: '1.2.0',
     });
+  }
+
+  // admin: type a name, add the film
+  if (pathname === '/api/admin/search' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    const query = (searchParams.get('q') ?? '').trim();
+    if (query.length < 2) return json(res, 200, { results: [] });
+    try {
+      const results = await searchMovies(query);
+      return json(res, 200, { results });
+    } catch (err) {
+      return fail(res, 502, err.message);
+    }
+  }
+
+  if (pathname === '/api/admin/add' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    try {
+      const body = await readBody(req);
+      const film = await filmFromImdb(String(body.imdbId ?? ''));
+      if (isCurated(film.tmdbId)) {
+        return json(res, 200, {
+          ok: true,
+          already: true,
+          item: curatedDetail(film.tmdbId) ?? {
+            id: `tmdb:${film.tmdbId}`,
+            title: film.title,
+            year: film.year,
+          },
+        });
+      }
+      const item = addCustomFilm(film);
+      cache.clear();
+      return json(res, 200, { ok: true, added: true, item });
+    } catch (err) {
+      return fail(res, err.status ?? 502, err.message);
+    }
+  }
+
+  if (pathname === '/api/admin/custom' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    return json(res, 200, {
+      items: customFilmList().map(({ id, title, year, tmdbId, poster, rating }) => ({
+        id, title, year, tmdbId, poster, rating,
+      })),
+    });
+  }
+
+  if (pathname === '/api/admin/remove' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    try {
+      const body = await readBody(req);
+      const removed = removeCustomFilm(body.tmdbId);
+      if (!removed) return fail(res, 404, 'not a custom film');
+      cache.clear();
+      return json(res, 200, { ok: true, removed: true });
+    } catch (err) {
+      return fail(res, err.status ?? 500, err.message);
+    }
   }
 
   // home

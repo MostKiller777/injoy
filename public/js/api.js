@@ -19,7 +19,7 @@ export class ApiError extends Error {
 const memo = new Map();
 const MEMO_TTL = 60_000;
 
-export async function api(path, { method = 'GET', body, timeout = 15_000, retries = 1, signal, cacheable = false } = {}) {
+export async function api(path, { method = 'GET', body, timeout = 15_000, retries = 1, signal, cacheable = false, headers = {} } = {}) {
   if (cacheable && method === 'GET') {
     const hit = memo.get(path);
     if (hit && Date.now() - hit.at < MEMO_TTL) return hit.value;
@@ -36,7 +36,9 @@ export async function api(path, { method = 'GET', body, timeout = 15_000, retrie
       const res = await fetch(path, {
         method,
         signal: controller.signal,
-        headers: body ? JSON_HEADERS : undefined,
+        headers: body || Object.keys(headers).length
+          ? { ...(body ? JSON_HEADERS : {}), ...headers }
+          : undefined,
         body: body ? JSON.stringify(body) : undefined,
         cache: 'no-store',
       });
@@ -76,6 +78,26 @@ export const getBrowse = ({ page = 1, genre = '', sort = 'popular' } = {}, signa
   api(`/api/browse?page=${page}&genre=${encodeURIComponent(genre)}&sort=${encodeURIComponent(sort)}`, { signal, cacheable: true });
 export const getGenres = () => api('/api/genres', { cacheable: true });
 export const getSeries = (signal) => api('/api/series', { signal, cacheable: true });
+
+/** Admin panel: search Cinemeta, add one film, list or remove custom films. */
+const adminHeaders = (key) => (key ? { 'x-admin-key': String(key) } : {});
+
+export const adminSearch = (q, key) =>
+  api(`/api/admin/search?q=${encodeURIComponent(q)}`, { headers: adminHeaders(key), timeout: 20_000, retries: 0 });
+
+export const adminAdd = (imdbId, key) =>
+  api('/api/admin/add', { method: 'POST', body: { imdbId }, headers: adminHeaders(key), timeout: 60_000, retries: 0 });
+
+export const adminCustom = (key) =>
+  api('/api/admin/custom', { headers: adminHeaders(key), timeout: 15_000, retries: 0 });
+
+export const adminRemove = (tmdbId, key) =>
+  api('/api/admin/remove', { method: 'POST', body: { tmdbId }, headers: adminHeaders(key), timeout: 15_000, retries: 0 });
+
+/** A new film must not hide behind the 60-second list memo. */
+export function invalidateCatalog() {
+  memo.clear();
+}
 
 export const getLocal = (signal) => api('/api/local', { signal });
 export const getDownload = (id, signal) => api(`/api/download/${encodeURIComponent(id)}`, { signal });

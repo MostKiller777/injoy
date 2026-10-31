@@ -20,6 +20,14 @@ No install step. No build step. No bundler. `node server/index.js` is the whole 
 - Adult and exploitation titles are excluded from the catalog.
 - TMDB integration (optional): with a key, detail pages resolve live metadata, cast, crew and trailers for the same ids.
 
+**Admin panel**
+- Open `#/admin` or click the sliders icon in the top bar. Type a movie name, press **Search**, pick the right result and press **Add**.
+- The server fetches keyless Cinemeta metadata, writes a `data/custom-films.json` record, rebuilds the catalogue and clears the server and client caches. No restart; the film is in search, Films, its genre rail, its detail page and playback immediately.
+- **Custom films** below the search lists everything added, with **Open** and **Remove**.
+- The panel is **localhost-only by default** (`127.0.0.1` / `::1`). A tunnel or public IP must set `ADMIN_KEY`; the panel then asks for it and stores it in the browser.
+- Set the key on a host with `sudo systemctl edit injoy`, add `[Service]` / `Environment=ADMIN_KEY=your-secret`, then `sudo systemctl daemon-reload && sudo systemctl restart injoy`. Paste the same key into the panel.
+- Cinemeta needs no key. A title without a TMDB id is refused because playback cannot resolve it.
+
 **Adding a film without editing the source**
 - Copy `deploy/custom-films.example.json` to `data/custom-films.json` (or `$DATA_DIR/custom-films.json` on a host) and edit the array.
 - Minimum useful record:

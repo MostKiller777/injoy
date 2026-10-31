@@ -1850,6 +1850,122 @@ kbd {
   .show-season .episode-play { display: none; }
 }
 
+/* Admin — search by name, add, list/remove custom films. */
+.admin-key-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+.admin-key-label {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  font-weight: 700;
+}
+.admin-key {
+  flex: 1;
+  min-width: 240px;
+  max-width: 520px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+.admin-key:focus { outline: none; border-color: var(--acc-2); }
+
+.admin-search-form { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+.admin-search {
+  flex: 1;
+  min-width: 220px;
+  padding: 11px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+}
+.admin-search:focus { outline: none; border-color: var(--acc-2); background: rgba(255, 255, 255, 0.09); }
+.admin-search::placeholder { color: var(--ink-faint); }
+
+.admin-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-height: 22px;
+  margin: 0 0 4px;
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+.admin-status-link { color: var(--acc-2); font-weight: 750; }
+.admin-status-link:hover { text-decoration: underline; }
+
+.admin-results { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 26px; }
+.admin-result {
+  display: grid;
+  grid-template-columns: 58px 1fr auto;
+  gap: 14px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.admin-result-poster {
+  width: 58px;
+  height: 87px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #0a0b12;
+}
+.admin-result-info { min-width: 0; }
+.admin-result-info h3 { margin: 0 0 3px; font-size: 14px; }
+.admin-result-meta { margin: 0; color: var(--ink-faint); font-size: 11.5px; font-weight: 650; }
+.admin-result-overview {
+  margin: 4px 0 0;
+  color: var(--ink-dim);
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.admin-section-title { margin: 24px 0 10px; font-size: 16px; letter-spacing: -0.01em; }
+.admin-custom { display: flex; flex-direction: column; gap: 6px; }
+.admin-row {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.admin-row-poster { width: 40px; height: 60px; object-fit: cover; border-radius: 6px; background: #0a0b12; }
+.admin-row-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.admin-row-info strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-row-info span { font-size: 11px; color: var(--ink-faint); font-family: var(--mono); }
+.admin-row-actions { display: flex; gap: 6px; }
+.admin-empty { color: var(--ink-faint); font-size: 12.5px; padding: 8px 2px; }
+.admin-foot { color: var(--ink-faint); font-size: 11.5px; margin-top: 18px; }
+
+@media (max-width: 640px) {
+  .admin-result { grid-template-columns: 48px 1fr; }
+  .admin-result-poster { width: 48px; height: 72px; }
+  .admin-result .btn { grid-column: 2; justify-self: start; }
+  .admin-row { grid-template-columns: 36px 1fr; }
+  .admin-row-actions { grid-column: 2; }
+}
+
 .episodes { margin-top: 30px; }
 
 .season-tabs {
