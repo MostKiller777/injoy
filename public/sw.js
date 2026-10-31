@@ -1,5 +1,5 @@
 /* injoy service worker — shell cache only. API traffic always goes to the network. */
-const VERSION = 'injoy-v53';
+const VERSION = 'injoy-v57';
 const SHELL = [
   '/',
   '/index.html',

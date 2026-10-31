@@ -108,8 +108,23 @@ export const agentDiagnose = () =>
 export const agentFix = (ids = []) =>
   api('/api/admin/agent/fix', { method: 'POST', body: { ids }, timeout: 90_000, retries: 0 });
 
-export const agentChat = (message, context = {}) =>
-  api('/api/admin/chat', { method: 'POST', body: { message, context }, timeout: 90_000, retries: 0 });
+export const agentChat = (message, context = {}, history = []) =>
+  api('/api/admin/chat', { method: 'POST', body: { message, context, history }, timeout: 240_000, retries: 0 });
+
+export const adminAiStatus = () =>
+  api('/api/admin/ai', { timeout: 15_000, retries: 0 });
+
+export const adminAiSave = ({ apiKey = '', baseUrl = '', model = '' } = {}) =>
+  api('/api/admin/ai', { method: 'POST', body: { apiKey, baseUrl, model }, timeout: 20_000, retries: 0 });
+
+export const codeChat = (message, history = []) =>
+  api('/api/admin/code/chat', { method: 'POST', body: { message, history }, timeout: 240_000, retries: 0 });
+
+export const codeApply = (id) =>
+  api('/api/admin/code/apply', { method: 'POST', body: { id }, timeout: 30_000, retries: 0 });
+
+export const codeReject = (id) =>
+  api('/api/admin/code/reject', { method: 'POST', body: { id }, timeout: 15_000, retries: 0 });
 
 /** A new film must not hide behind the 60-second list memo. */
 export function invalidateCatalog() {

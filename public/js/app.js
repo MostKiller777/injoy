@@ -5,10 +5,15 @@ import {
   adminLogout,
   adminRemove,
   adminSearch,
+  adminAiSave,
+  adminAiStatus,
   adminSession,
   agentChat,
   agentDiagnose,
   agentFix,
+  codeApply,
+  codeChat,
+  codeReject,
   getBrowse,
   getDetail,
   getGenres,
@@ -29,6 +34,34 @@ import {
 } from './state.js';
 import * as ui from './ui.js';
 import { el } from './ui.js';
+
+const ADMIN_CHAT_KEY = 'injoy.adminChat.v1';
+const CODE_CHAT_KEY = 'injoy.codeChat.v1';
+
+function readStored(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // private mode or quota — the in-memory chat still works
+  }
+}
+
+function dropStored(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // nothing to clear
+  }
+}
 
 // The player pulls in the DASH/HLS feeders and every control. None of that is
 // needed to paint the catalogue, so it is loaded on the first play instead of
@@ -190,6 +223,7 @@ function route() {
   if (path === '/genres') return renderGenres(controller.signal);
   if (path === '/list') return renderList();
   if (path === '/search') return renderSearch(params.get('q') ?? '', controller.signal);
+  if (path === '/admin/code') return renderCodeAgent(controller.signal);
   if (path === '/admin') return renderAdmin(controller.signal);
   return renderHome(controller.signal);
 }
@@ -473,18 +507,18 @@ async function renderAdmin(signal) {
   hero.hidden = true;
   ui.clear(view);
 
-  let authenticated = false;
+  let session = { authenticated: false, ai: false, model: null, baseUrl: null, source: null };
   try {
-    authenticated = Boolean((await adminSession()).authenticated);
+    session = await adminSession();
   } catch {
     // Server unreachable: show the login so the user can retry.
   }
   if (signal?.aborted) return;
-  if (authenticated) renderAdminPanel(signal);
+  if (session.authenticated) renderAdminPanel(signal, session);
   else renderAdminLogin(signal);
 }
 
-function renderAdminLogin(signal) {
+function renderAdminLogin(signal, afterLogin = () => renderAdmin(signal)) {
   const password = el('input', {
     class: 'admin-login-input',
     type: 'password',
@@ -508,7 +542,7 @@ function renderAdminLogin(signal) {
       await adminLogin(password.value);
       if (signal?.aborted) return;
       password.value = '';
-      await renderAdmin(signal);
+      await afterLogin();
     } catch (err) {
       status.textContent = err.status === 401 ? 'Wrong password.' : `Could not sign in: ${err.message}`;
       password.select();
@@ -521,13 +555,15 @@ function renderAdminLogin(signal) {
     pageHead('Admin', 'Private panel. Sign in to add films.'),
     el('div', { class: 'admin-login-card' },
       el('p', { class: 'admin-login-copy' },
-        'The password is in ',
+        'The password is set by ',
+        el('code', { text: 'ADMIN_KEY' }),
+        ' in ',
+        el('code', { text: '.env' }),
+        '. Without it, a generated key lives in ',
         el('code', { text: 'data/admin-key.txt' }),
         ' on this machine, or ',
         el('code', { text: '/var/lib/injoy/admin-key.txt' }),
-        ' on a host. Set ',
-        el('code', { text: 'ADMIN_KEY' }),
-        ' to choose your own.'),
+        ' on a host.'),
       form,
       status,
       el('p', { class: 'admin-foot', text: 'The session lasts 24 hours. Closing the browser or pressing Lock signs out.' }),
@@ -542,7 +578,7 @@ function renderAdminLogin(signal) {
  * The server does the rest: Cinemeta metadata, a custom-films.json record, a
  * catalogue rebuild and a cache clear. No restart, no code edit.
  */
-async function renderAdminPanel(signal) {
+async function renderAdminPanel(signal, session = {}) {
   const query = el('input', {
     class: 'admin-search', type: 'search', spellcheck: 'false',
     placeholder: 'Type a movie name…', 'aria-label': 'Movie name',
@@ -705,6 +741,8 @@ async function renderAdminPanel(signal) {
     },
   }, 'Lock');
 
+  const codeLink = el('a', { class: 'btn btn-ghost btn-mini', href: '#/admin/code', text: 'Code agent' });
+
   /* --------------------------- site doctor agent --------------------------- */
 
   let doctorReport = null;
@@ -823,15 +861,126 @@ async function renderAdminPanel(signal) {
   const chatSend = el('button', { class: 'btn btn-primary btn-mini', type: 'submit' }, 'Send');
   const chatForm = el('form', { class: 'agent-form' }, chatInput, chatSend);
   const chatChips = el('div', { class: 'agent-suggestions' });
-  let chatContext = {};
+  const savedChat = readStored(ADMIN_CHAT_KEY, null);
+  let chatContext = savedChat?.context && typeof savedChat.context === 'object' ? savedChat.context : {};
+  let chatLog = Array.isArray(savedChat?.messages) ? savedChat.messages.slice(-60) : [];
+  let chatHistory = chatLog
+    .filter((entry) => entry.role === 'user' || entry.role === 'assistant')
+    .slice(-12)
+    .map((entry) => ({ role: entry.role, content: entry.text }));
+  const persistChat = () => writeStored(ADMIN_CHAT_KEY, {
+    messages: chatLog.slice(-60),
+    context: chatContext,
+    updatedAt: Date.now(),
+  });
+  const WELCOME = 'I can check and fix the site, add or remove films, show stats, logs and backups. What do you need?';
+  let aiEnabled = Boolean(session.ai);
+  let aiModel = session.model ?? null;
+  let aiSource = session.source ?? 'none';
+  const aiBadge = el('span', { class: 'agent-badge' });
+  const chatSub = el('p', { class: 'agent-chat-sub' });
+  const aiSummary = el('summary', {});
 
-  const appendMessage = (role, text, link = null) => {
+  const paintAi = () => {
+    aiBadge.textContent = aiEnabled ? `AI · ${aiModel ?? 'model'}` : 'Command agent';
+    aiBadge.classList.toggle('is-ai', aiEnabled);
+    chatSub.textContent = aiEnabled
+      ? 'Model-driven agent with site tools. Ask it to check, fix, add, remove or explain.'
+      : 'Command agent. Add an AI key below to let a language model drive it.';
+    aiSummary.textContent = aiEnabled ? `AI settings · ${aiModel ?? 'active'}` : 'AI settings · add a key';
+  };
+  paintAi();
+
+  const aiBaseInput = el('input', {
+    class: 'admin-ai-field', type: 'text', spellcheck: 'false',
+    value: session.baseUrl ?? 'https://api.openai.com/v1',
+    'aria-label': 'AI base URL',
+  });
+  const aiModelInput = el('input', {
+    class: 'admin-ai-field', type: 'text', spellcheck: 'false',
+    value: aiModel ?? 'gpt-4o-mini',
+    'aria-label': 'AI model',
+  });
+  const aiKeyInput = el('input', {
+    class: 'admin-ai-field', type: 'password', autocomplete: 'off',
+    placeholder: 'Paste an API key — leave blank to keep the saved one',
+    'aria-label': 'AI API key',
+  });
+  const aiStatusText = el('p', {
+    class: 'admin-ai-status',
+    text: aiSource === 'env'
+      ? 'Using AI_API_KEY from the environment.'
+      : aiEnabled ? 'AI key saved.' : 'No AI key yet. The command agent handles requests.',
+  });
+  const aiSaveButton = el('button', { class: 'btn btn-primary btn-mini', type: 'submit' }, 'Save settings');
+  const aiForm = el('form', { class: 'admin-ai-form' },
+    el('label', { class: 'admin-ai-label' }, el('span', { text: 'Base URL' }), aiBaseInput),
+    el('label', { class: 'admin-ai-label' }, el('span', { text: 'Model' }), aiModelInput),
+    el('label', { class: 'admin-ai-label' }, el('span', { text: 'API key' }), aiKeyInput),
+    el('div', { class: 'admin-ai-actions' }, aiSaveButton, aiStatusText),
+  );
+
+  aiForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    aiSaveButton.disabled = true;
+    aiStatusText.textContent = 'Saving…';
+    try {
+      const status = await adminAiSave({
+        apiKey: aiKeyInput.value,
+        baseUrl: aiBaseInput.value,
+        model: aiModelInput.value,
+      });
+      aiEnabled = Boolean(status.configured);
+      aiModel = status.model;
+      aiSource = status.source;
+      aiKeyInput.value = '';
+      paintAi();
+      aiStatusText.textContent = status.configured
+        ? `AI active (${status.model})${status.source === 'env' ? ' using environment key' : ''}.`
+        : 'Saved. Add an API key to activate the model.';
+      ui.toast(status.configured ? 'AI agent enabled' : 'AI settings saved');
+    } catch (err) {
+      if (err.status === 401) { renderAdmin(); return; }
+      aiStatusText.textContent = `Could not save: ${err.message}`;
+    } finally {
+      aiSaveButton.disabled = false;
+    }
+  });
+
+  void adminAiStatus().then((status) => {
+    if (signal?.aborted) return;
+    aiEnabled = Boolean(status.configured);
+    aiModel = status.model;
+    aiSource = status.source;
+    if (!aiBaseInput.value) aiBaseInput.value = status.baseUrl;
+    if (!aiModelInput.value) aiModelInput.value = status.model;
+    if (status.source === 'env') aiStatusText.textContent = 'Using AI_API_KEY from the environment.';
+    else if (status.configured) aiStatusText.textContent = 'AI key saved.';
+    paintAi();
+  }).catch(() => { /* settings are optional */ });
+
+  const appendMessage = (role, text, link = null, { record = true } = {}) => {
     const bubble = el('div', { class: 'agent-bubble' }, el('span', { text: String(text ?? '') }));
     if (link) bubble.append(' ', el('a', { class: 'agent-link', href: link, text: 'Open' }));
     const row = el('div', { class: `agent-msg ${role}` }, bubble);
     chatMessages.append(row);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (record) {
+      chatLog.push({ role, text: String(text ?? '').slice(0, 8_000), link: link ?? null });
+      chatLog = chatLog.slice(-60);
+      persistChat();
+    }
     return row;
+  };
+
+  const clearChat = () => {
+    dropStored(ADMIN_CHAT_KEY);
+    chatLog = [];
+    chatHistory = [];
+    chatContext = {};
+    chatMessages.replaceChildren();
+    appendMessage('agent', WELCOME, null, { record: false });
+    ui.toast('Chat cleared');
   };
 
   const sendAgent = async (text) => {
@@ -840,12 +989,18 @@ async function renderAdminPanel(signal) {
     appendMessage('user', message);
     chatInput.value = '';
     chatSend.disabled = true;
-    const thinking = appendMessage('agent', 'Working…');
+    const thinking = appendMessage('agent', 'Working…', null, { record: false });
     try {
-      const data = await agentChat(message, chatContext);
+      const data = await agentChat(message, chatContext, chatHistory);
       chatContext = data.context ?? {};
+      persistChat();
       thinking.remove();
       appendMessage('agent', data.reply ?? 'Done.', data.link ?? null);
+      chatHistory = chatLog
+        .filter((entry) => entry.role === 'user' || entry.role === 'assistant')
+        .slice(-12)
+        .map((entry) => ({ role: entry.role, content: entry.text }));
+      if (data.warning) appendMessage('agent', data.warning, null, { record: false });
       if (data.refresh) {
         invalidateCatalog();
         await loadCustom();
@@ -854,7 +1009,7 @@ async function renderAdminPanel(signal) {
     } catch (err) {
       thinking.remove();
       if (err.status === 401) { renderAdmin(); return; }
-      appendMessage('agent', `Error: ${err.message}`);
+      appendMessage('agent', `Error: ${err.message}`, null, { record: false });
     } finally {
       chatSend.disabled = false;
       chatInput.focus();
@@ -873,28 +1028,47 @@ async function renderAdminPanel(signal) {
     }, label));
   }
 
-  appendMessage('agent', 'I can check and fix the site, add or remove films, show stats, logs and backups. What do you need?');
+  if (chatLog.length) {
+    for (const entry of chatLog) {
+      if (entry?.role === 'user' || entry?.role === 'agent') {
+        appendMessage(entry.role, entry.text, entry.link ?? null, { record: false });
+      }
+    }
+  } else {
+    appendMessage('agent', WELCOME, null, { record: false });
+  }
 
   view.append(
-    pageHead('Admin', 'Type a movie name. The server finds it, adds it, and reloads the catalogue instantly.', [lock]),
-    el('section', { class: 'agent-chat-card' },
-      el('div', { class: 'agent-chat-head' },
-        el('div', {},
-          el('h2', { class: 'agent-chat-title', text: 'Agent chat' }),
-          el('p', { class: 'agent-chat-sub', text: 'Ask about the site, or tell it what to check, fix, add or remove.' }),
+    pageHead('Admin', 'Chat with the agent, add films, and run the site doctor.', [codeLink, lock]),
+    el('div', { class: 'admin-dashboard' },
+      el('section', { class: 'admin-card agent-chat-card' },
+        el('div', { class: 'agent-chat-head' },
+          el('div', {},
+            el('h2', { class: 'agent-chat-title', text: 'Agent chat' }),
+            chatSub,
+          ),
+          el('div', { class: 'agent-head-actions' },
+            aiBadge,
+            el('button', { class: 'agent-chip', type: 'button', on: { click: clearChat } }, 'Clear'),
+          ),
         ),
+        chatMessages,
+        chatChips,
+        chatForm,
+        el('details', { class: 'agent-ai-settings' }, aiSummary, aiForm),
       ),
-      chatMessages,
-      chatChips,
-      chatForm,
+      el('section', { class: 'admin-card admin-tools-card' },
+        el('h2', { class: 'admin-card-title', text: 'Add a film' }),
+        el('p', { class: 'admin-card-sub', text: 'Search by name, pick the result, press Add. No restart.' }),
+        form,
+        status,
+        results,
+        el('h3', { class: 'admin-subtitle', text: 'Custom films' }),
+        customList,
+        el('p', { class: 'admin-foot', text: 'Entries are stored in data/custom-films.json. Removing one here removes it from the catalogue.' }),
+      ),
     ),
-    form,
-    status,
-    results,
-    el('h2', { class: 'admin-section-title', text: 'Custom films' }),
-    customList,
-    el('p', { class: 'admin-foot', text: 'Entries are stored in data/custom-films.json. Removing one here removes it from the catalogue.' }),
-    el('section', { class: 'admin-doctor' },
+    el('section', { class: 'admin-card admin-doctor' },
       el('div', { class: 'admin-doctor-head' },
         el('div', {},
           el('h2', { class: 'admin-section-title', text: 'Site doctor' }),
@@ -910,6 +1084,240 @@ async function renderAdminPanel(signal) {
   chatInput.focus();
   void loadCustom();
   void runDoctor();
+}
+
+/* ------------------------------- code agent ------------------------------ */
+
+async function renderCodeAgent(signal) {
+  hero.hidden = true;
+  ui.clear(view);
+
+  let session = { authenticated: false, ai: false, model: null };
+  try {
+    session = await adminSession();
+  } catch {
+    // show login below
+  }
+  if (signal?.aborted) return;
+  if (!session.authenticated) {
+    renderAdminLogin(signal, () => renderCodeAgent(signal));
+    return;
+  }
+
+  document.title = 'Code agent — Injoy';
+
+  const back = el('a', { class: 'btn btn-ghost btn-mini', href: '#/admin', text: 'Admin' });
+  const lock = el('button', {
+    class: 'btn btn-ghost btn-mini',
+    type: 'button',
+    on: {
+      click: async () => {
+        try { await adminLogout(); } catch { /* clear attempt */ }
+        renderAdmin();
+      },
+    },
+  }, 'Lock');
+
+  const aiBadge = el('span', {
+    class: session.ai ? 'agent-badge is-ai' : 'agent-badge',
+    text: session.ai ? `AI · ${session.model ?? 'model'}` : 'No model',
+  });
+
+  const messages = el('div', { class: 'agent-messages', role: 'log', 'aria-live': 'polite' });
+  const input = el('input', {
+    class: 'agent-input', type: 'text', placeholder: 'Ask the code agent…',
+    autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Message the code agent',
+  });
+  const send = el('button', { class: 'btn btn-primary btn-mini', type: 'submit' }, 'Send');
+  const form = el('form', { class: 'agent-form' }, input, send);
+  const chips = el('div', { class: 'agent-suggestions' });
+  const editsWrap = el('div', { class: 'code-edits' });
+  const savedCode = readStored(CODE_CHAT_KEY, null);
+  let codeLog = Array.isArray(savedCode?.messages) ? savedCode.messages.slice(-60) : [];
+  let savedEdits = Array.isArray(savedCode?.edits) ? savedCode.edits.slice(-20) : [];
+  const seenEdits = new Set(savedEdits.map((entry) => entry.id));
+  const CODE_WELCOME = 'I can read the repo, explain code, find bugs and propose edits. I never write until you press Apply.';
+  let history = codeLog
+    .filter((entry) => entry.role === 'user' || entry.role === 'agent')
+    .slice(-12)
+    .map((entry) => ({ role: entry.role === 'agent' ? 'assistant' : 'user', content: entry.text }));
+  const persistCode = () => writeStored(CODE_CHAT_KEY, {
+    messages: codeLog.slice(-60),
+    edits: savedEdits.slice(-20),
+    updatedAt: Date.now(),
+  });
+
+  const append = (role, text, { record = true } = {}) => {
+    const row = el('div', { class: `agent-msg ${role}` },
+      el('div', { class: 'agent-bubble' }, el('span', { text: String(text ?? '') })));
+    messages.append(row);
+    messages.scrollTop = messages.scrollHeight;
+    if (record) {
+      codeLog.push({ role, text: String(text ?? '').slice(0, 8_000) });
+      codeLog = codeLog.slice(-60);
+      persistCode();
+    }
+    return row;
+  };
+
+  const clearCode = () => {
+    dropStored(CODE_CHAT_KEY);
+    codeLog = [];
+    savedEdits = [];
+    seenEdits.clear();
+    history = [];
+    messages.replaceChildren();
+    editsWrap.replaceChildren();
+    append('agent', CODE_WELCOME, { record: false });
+    ui.toast('Code chat cleared');
+  };
+
+  const renderEdit = (edit, { record = true } = {}) => {
+    if (!edit?.id || seenEdits.has(edit.id)) return;
+    seenEdits.add(edit.id);
+    if (record) {
+      savedEdits.push(edit);
+      savedEdits = savedEdits.slice(-20);
+      persistCode();
+    }
+
+    const diff = el('pre', { class: 'code-diff' });
+    for (const line of String(edit.diff ?? '').split('\n')) {
+      diff.append(el('span', {
+        class: line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del' : 'diff-ctx',
+        text: `${line}\n`,
+      }));
+    }
+
+    const note = el('p', { class: 'code-edit-note' });
+    const apply = el('button', { class: 'btn btn-primary btn-mini', type: 'button' }, 'Apply');
+    const reject = el('button', { class: 'btn btn-ghost btn-mini', type: 'button' }, 'Reject');
+
+    apply.addEventListener('click', async () => {
+      apply.disabled = true;
+      reject.disabled = true;
+      apply.textContent = 'Applying…';
+      try {
+        const result = await codeApply(edit.id);
+        apply.textContent = 'Applied';
+        reject.remove();
+        savedEdits = savedEdits.filter((entry) => entry.id !== edit.id);
+        persistCode();
+        note.textContent = `Applied · ${result.check?.detail ?? 'ok'}${result.restartRequired
+          ? ' · restart the Node server to load it'
+          : ' · hard-refresh the browser to load it'}`;
+        ui.toast('Edit applied');
+      } catch (err) {
+        apply.disabled = false;
+        reject.disabled = false;
+        apply.textContent = 'Apply';
+        note.textContent = `Could not apply: ${err.message}`;
+      }
+    });
+
+    reject.addEventListener('click', async () => {
+      try { await codeReject(edit.id); } catch { /* pending edits expire anyway */ }
+      savedEdits = savedEdits.filter((entry) => entry.id !== edit.id);
+      persistCode();
+      card.remove();
+      ui.toast('Edit rejected');
+    });
+
+    const card = el('article', { class: 'code-edit' },
+      el('div', { class: 'code-edit-head' },
+        el('div', {},
+          el('strong', { class: 'code-edit-path', text: edit.path }),
+          edit.summary ? el('p', { class: 'code-edit-summary', text: edit.summary }) : null,
+        ),
+        el('span', { class: 'chip subtle', text: 'pending' }),
+      ),
+      diff,
+      el('div', { class: 'code-edit-actions' }, apply, reject, note),
+    );
+    editsWrap.append(card);
+    editsWrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+
+  const sendMessage = async (text) => {
+    const message = String(text ?? input.value).trim();
+    if (!message) return;
+    append('user', message);
+    input.value = '';
+    send.disabled = true;
+    const thinking = append('agent', 'Working…', { record: false });
+    try {
+      const data = await codeChat(message, history);
+      thinking.remove();
+      const reply = data.reply ?? 'Done.';
+      append('agent', reply);
+      history = codeLog
+        .filter((entry) => entry.role === 'user' || entry.role === 'agent')
+        .slice(-12)
+        .map((entry) => ({ role: entry.role === 'agent' ? 'assistant' : 'user', content: entry.text }));
+      for (const edit of data.edits ?? []) renderEdit(edit);
+    } catch (err) {
+      thinking.remove();
+      if (err.status === 401) { renderAdmin(); return; }
+      append('agent', `Error: ${err.message}`, { record: false });
+    } finally {
+      send.disabled = false;
+      input.focus();
+    }
+  };
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void sendMessage();
+  });
+
+  for (const label of ['Find a bug', 'Read server/index.js', 'Run the site doctor', 'Improve the admin CSS', 'Check player.js']) {
+    chips.append(el('button', {
+      class: 'agent-chip', type: 'button',
+      on: { click: () => { void sendMessage(label); } },
+    }, label));
+  }
+
+  if (codeLog.length) {
+    for (const entry of codeLog) {
+      if (entry?.role === 'user' || entry?.role === 'agent') {
+        append(entry.role, entry.text, { record: false });
+      }
+    }
+  } else {
+    append('agent', CODE_WELCOME, { record: false });
+  }
+  for (const edit of savedEdits) renderEdit(edit, { record: false });
+
+  const nodes = [
+    pageHead('Code agent', 'Reads the repo, proposes edits and checks syntax. You approve every write.', [back, lock]),
+  ];
+  if (!session.ai) {
+    nodes.push(el('div', { class: 'admin-card code-note' },
+      el('p', { text: 'No AI model configured. Open Admin → AI settings and add a key, or run a free local model with Ollama.' }),
+      el('a', { class: 'btn btn-ghost btn-mini', href: '#/admin', text: 'Open AI settings' }),
+    ));
+  }
+  nodes.push(
+    el('section', { class: 'admin-card agent-chat-card' },
+      el('div', { class: 'agent-chat-head' },
+        el('div', {},
+          el('h2', { class: 'agent-chat-title', text: 'Code chat' }),
+          el('p', { class: 'agent-chat-sub', text: 'Changes are proposed, never written until you press Apply.' }),
+        ),
+        el('div', { class: 'agent-head-actions' },
+          aiBadge,
+          el('button', { class: 'agent-chip', type: 'button', on: { click: clearCode } }, 'Clear'),
+        ),
+      ),
+      messages,
+      chips,
+      form,
+    ),
+    editsWrap,
+    el('p', { class: 'admin-foot', text: 'Applied edits are backed up under data/backups/code. Server-side changes need a Node restart; static changes need a hard refresh.' }),
+  );
+  view.append(...nodes);
+  input.focus();
 }
 
 /* -------------------------------- genres --------------------------------- */

@@ -26,6 +26,9 @@ import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFi
 import { filmFromImdb, searchMovies } from './lib/cinemeta.js';
 import { repair, runDiagnostics } from './lib/doctor.js';
 import { agentChat } from './lib/agent-chat.js';
+import { aiChat } from './lib/ai-chat.js';
+import { aiStatus, saveAiConfig } from './lib/ai.js';
+import { applyCodeEdit, codeChat, rejectCodeEdit } from './lib/code-agent.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 loadEnv(join(ROOT, '.env'));
@@ -602,7 +605,14 @@ async function handleApi(req, res, url) {
 
   // admin authentication: password -> HttpOnly session cookie
   if (pathname === '/api/admin/session' && method === 'GET') {
-    return json(res, 200, { authenticated: adminFromCookie(req) });
+    const status = aiStatus();
+    return json(res, 200, {
+      authenticated: adminFromCookie(req),
+      ai: status.configured,
+      model: status.model,
+      baseUrl: status.baseUrl,
+      source: status.source,
+    });
   }
 
   if (pathname === '/api/admin/login' && method === 'POST') {
@@ -657,18 +667,91 @@ async function handleApi(req, res, url) {
     }
   }
 
-  if (pathname === '/api/admin/chat' && method === 'POST') {
+  if (pathname === '/api/admin/ai' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    return json(res, 200, aiStatus());
+  }
+
+  if (pathname === '/api/admin/ai' && method === 'POST') {
     if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
     try {
       const body = await readBody(req);
-      const result = await agentChat({
+      const status = saveAiConfig({
+        apiKey: body.apiKey,
+        baseUrl: body.baseUrl,
+        model: body.model,
+      });
+      return json(res, 200, status);
+    } catch (err) {
+      return fail(res, 400, `could not save AI settings: ${err.message}`);
+    }
+  }
+
+  if (pathname === '/api/admin/code/chat' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    try {
+      const body = await readBody(req);
+      const result = await codeChat({
         message: body.message,
-        context: body.context,
+        history: body.history,
         cache,
         admin: { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' },
         publicDir: PUBLIC_DIR,
       });
       return json(res, 200, result);
+    } catch (err) {
+      return fail(res, 500, `code agent failed: ${err.message}`);
+    }
+  }
+
+  if (pathname === '/api/admin/code/apply' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    try {
+      const body = await readBody(req);
+      const result = applyCodeEdit(body.id);
+      if (!result.ok) return fail(res, result.status ?? 422, result.error ?? 'could not apply the edit');
+      return json(res, 200, result);
+    } catch (err) {
+      return fail(res, 500, `apply failed: ${err.message}`);
+    }
+  }
+
+  if (pathname === '/api/admin/code/reject' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    try {
+      const body = await readBody(req);
+      return json(res, 200, rejectCodeEdit(body.id));
+    } catch (err) {
+      return fail(res, 500, `reject failed: ${err.message}`);
+    }
+  }
+
+  if (pathname === '/api/admin/chat' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    try {
+      const body = await readBody(req);
+      const adminInfo = { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' };
+      const message = body.message;
+      const context = body.context ?? {};
+      const history = Array.isArray(body.history) ? body.history : [];
+
+      let ai = null;
+      try {
+        ai = await aiChat({ message, history, context, cache, admin: adminInfo, publicDir: PUBLIC_DIR });
+      } catch (err) {
+        ai = { error: err };
+      }
+
+      if (ai && !ai.error) {
+        return json(res, 200, { ...ai, mode: 'ai' });
+      }
+
+      const local = await agentChat({ message, context, cache, admin: adminInfo, publicDir: PUBLIC_DIR });
+      return json(res, 200, {
+        ...local,
+        mode: 'local',
+        ...(ai?.error ? { warning: `AI unavailable: ${ai.error.message}` } : {}),
+      });
     } catch (err) {
       return fail(res, 500, `agent failed: ${err.message}`);
     }
