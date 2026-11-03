@@ -82,7 +82,10 @@ function chromeFlags(profile, netlog, pageUrl, windowSize) {
     `--window-size=${windowSize}`,
     `--user-data-dir=${profile}`,
     '--log-net-log=' + netlog,
-    '--net-log-capture-mode=IncludeSensitive',
+    // URLs are logged in every capture mode; IncludeSensitive only adds headers
+    // and cookies, which this resolver never reads. The default keeps a 40 MB
+    // netlog down to a few hundred KB, which matters on a small host.
+    '--net-log-capture-mode=Default',
     pageUrl,
   ];
 }
@@ -118,7 +121,12 @@ function pickCandidate(text) {
  * makes. Resolves to `{ url, type, referer }` or null when nothing surfaces
  * inside the timeout.
  */
-export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600, signal = null, windowSize = '1920,1080' } = {}) {
+export async function sniffStream(pageUrl, {
+  timeoutMs = Number(process.env.INJOY_SNIFF_TIMEOUT ?? 30_000) || 30_000,
+  pollMs = 600,
+  signal = null,
+  windowSize = '1920,1080',
+} = {}) {
   const chrome = chromePath();
   if (!chrome) return { error: 'no chrome or edge binary found' };
   if (signal?.aborted) return { error: 'cancelled' };
