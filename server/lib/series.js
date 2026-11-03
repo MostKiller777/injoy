@@ -1,6 +1,7 @@
 import { imgProxy } from './images.js';
 import { SERIES_DATA } from './series-data.js';
 import { tmdbForImdb } from './tmdb-ids.js';
+import { orderProviders } from './providers.js';
 
 /**
  * Series shelf. Same contract as the film shelves: frozen metadata, ids in a
@@ -67,8 +68,9 @@ export function episodeSources(show, season = 1, episode = 1) {
   if (!show?.imdbId) return [];
   const tmdbId = tmdbForImdb(show.imdbId);
   const ids = { imdbId: show.imdbId, tmdbId, season, episode };
-  // Ad-heavy hosts go last so the episode opens on a clean player first.
-  const ordered = [...EPISODE_PROVIDERS].sort((a, b) => Number(a.ads ?? false) - Number(b.ads ?? false));
+  // VidSrc first so episodes open on the host that answers most often; the
+  // ad-heavy hosts stay last.
+  const ordered = orderProviders(EPISODE_PROVIDERS);
   return ordered
     .map((provider) => ({ provider, url: provider.url(ids) }))
     .filter((entry) => entry.url)

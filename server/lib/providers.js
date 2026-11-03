@@ -71,12 +71,32 @@ export const EMBED_PROVIDERS = [
 ];
 
 /**
+ * VidSrc first, everything else after.
+ *
+ * The order below is what the player opens with and what "Next source" walks
+ * through, so the pinned list is the default hand: vidsrc.to answers most
+ * often for both films and episodes, and the other VidSrc mirrors share its
+ * catalogue. Nothing is dropped — ad-heavy hosts still sit at the back.
+ */
+export const PINNED_PROVIDERS = ['vidsrc.to', 'vidsrc.pm', 'vidsrc.cc', 'vidsrc.xyz'];
+
+export function orderProviders(providers) {
+  const pinned = PINNED_PROVIDERS
+    .map((id) => providers.find((provider) => provider.id === id))
+    .filter(Boolean);
+  const rest = providers.filter((provider) => !PINNED_PROVIDERS.includes(provider.id));
+  const clean = rest.filter((provider) => !provider.ads);
+  const ads = rest.filter((provider) => provider.ads);
+  return [...pinned, ...clean, ...ads];
+}
+
+/**
  * Ad-heavy hosts sit at the back of the picker so the default source is one
  * that does not open a popunder the moment the frame paints. The flag only
  * orders and labels — every provider stays selectable.
  */
 export function orderedProviders() {
-  return [...EMBED_PROVIDERS].sort((a, b) => Number(a.ads ?? false) - Number(b.ads ?? false));
+  return orderProviders(EMBED_PROVIDERS);
 }
 
 export function embedSources(tmdbId) {
