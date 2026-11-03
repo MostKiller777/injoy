@@ -43,6 +43,50 @@ export function chromePath() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * How many embed pages may be sniffed at once.
+ *
+ * Two browsers overlap on a desktop and hide a slow provider's timeout. A
+ * 512 MB container cannot hold two Chromiums next to Node, so a small host sets
+ * this to one and pays the timeout serially instead of being OOM-killed.
+ */
+const MAX_SNIFFERS = Math.max(1, Number(process.env.INJOY_SNIFF_PARALLEL ?? 2) || 1);
+
+/**
+ * Flags that make headless Chromium cheap enough for a free container.
+ *
+ * Only the netlog matters here — nothing is rendered for a human — so images
+ * and the GPU process are switched off before the page paints. `--single-process`
+ * is the difference between fitting in 512 MB and being killed; it is only used
+ * where the host says the browser runs unsandboxed (i.e. inside the image).
+ */
+function chromeFlags(profile, netlog, pageUrl, windowSize) {
+  const lean = process.env.CHROME_NO_SANDBOX === '1';
+  return [
+    '--headless=new',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-extensions',
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-sync',
+    '--metrics-recording-only',
+    '--autoplay-policy=no-user-gesture-required',
+    '--mute-audio',
+    // The feature page is never painted and never seen: skipping image decode
+    // cuts the renderer's peak by more than half on ad-heavy providers.
+    '--blink-settings=imagesEnabled=false',
+    ...(lean ? ['--no-sandbox', '--disable-dev-shm-usage', '--single-process', '--no-zygote'] : []),
+    `--window-size=${windowSize}`,
+    `--user-data-dir=${profile}`,
+    '--log-net-log=' + netlog,
+    '--net-log-capture-mode=IncludeSensitive',
+    pageUrl,
+  ];
+}
+
 function killTree(child) {
   if (!child || child.killed) return;
   try {
@@ -83,24 +127,7 @@ export async function sniffStream(pageUrl, { timeoutMs = 30_000, pollMs = 600, s
   const netlog = join(dir, 'netlog.json');
   const profile = join(dir, 'profile');
 
-  const child = spawn(chrome, [
-    '--headless=new',
-    '--disable-gpu',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-extensions',
-    '--disable-background-networking',
-    '--autoplay-policy=no-user-gesture-required',
-    '--mute-audio',
-    // A service account on a locked-down Linux host cannot start Chrome's
-    // sandbox; the deploy unit sets this and the browser still sniffs fine.
-    ...(process.env.CHROME_NO_SANDBOX === '1' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
-    `--window-size=${windowSize}`,
-    `--user-data-dir=${profile}`,
-    '--log-net-log=' + netlog,
-    '--net-log-capture-mode=IncludeSensitive',
-    pageUrl,
-  ], { stdio: 'ignore', windowsHide: true });
+  const child = spawn(chrome, chromeFlags(profile, netlog, pageUrl, windowSize), { stdio: 'ignore', windowsHide: true });
 
   const deadline = Date.now() + timeoutMs;
   let found = null;
@@ -157,7 +184,8 @@ function episodeEmbeds(tmdbId, imdbId, season, episode) {
 
 // How long a provider runs alone before the next one is launched alongside it.
 // Serial hunting made a miss cost a full 30 s timeout each, so an unavailable
-// title took two minutes to give up; hedging overlaps the waits instead.
+// title took two minutes to give up; hedging overlaps the waits instead, up to
+// MAX_SNIFFERS browsers.
 const HEDGE_MS = 5_000;
 
 /**
@@ -182,6 +210,7 @@ export async function resolveStream({ tmdbId, imdbId = null, season = null, epis
   return new Promise((resolve) => {
     let settled = false;
     let launched = 0;
+    let active = 0;
     const timers = [];
 
     const finish = (result) => {
@@ -194,11 +223,17 @@ export async function resolveStream({ tmdbId, imdbId = null, season = null, epis
 
     const launch = () => {
       if (settled || launched >= pages.length) return;
+      // A serial host waits for the live sniff instead of opening a second
+      // browser on top of it.
+      if (active >= MAX_SNIFFERS) return;
       const page = pages[launched];
       launched += 1;
+      active += 1;
       onAttempt?.(page);
 
       sniffStream(page, { signal: controller.signal }).then((result) => {
+        active -= 1;
+        if (settled) return;
         tried.push({ page, ...result });
         if (result.url) {
           finish({ ...result, page, tried });

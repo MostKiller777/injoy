@@ -27,6 +27,10 @@ services:
       # hardened renderer.
       - key: CHROME_NO_SANDBOX
         value: "1"
+      # 512 MB cannot hold two Chromiums next to Node, so the resolver sniffs
+      # one provider at a time here instead of hedging.
+      - key: INJOY_SNIFF_PARALLEL
+        value: "1"
       # Prompted for once when the blueprint is created, never stored in git.
       - key: ADMIN_KEY
         sync: false

@@ -1269,6 +1269,7 @@ export async function openPlayer(item) {
   const closePlayer = () => {
     if (closed) return;
     closed = true;
+    stopUpgradeWatch();
     if (video) saveProgress(item.id, video.currentTime, Number.isFinite(video.duration) ? video.duration : current?.duration);
     clearInterval(saveTimer);
     clearTimeout(hideTimer);
@@ -1641,6 +1642,45 @@ export async function openPlayer(item) {
   };
 
   /**
+   * The first play of a title answers with an embed while the server sniffs the
+   * provider pages in the background. That sniff keeps running after the reply,
+   * so "embed now" can become "direct in twenty seconds". Rather than make the
+   * visitor press anything, the player keeps asking and swaps itself the moment
+   * the server has a manifest — the native bar, seeking, volume and captions
+   * arrive without a reload.
+   */
+  let upgradeTimer = null;
+  const stopUpgradeWatch = () => {
+    if (upgradeTimer) clearInterval(upgradeTimer);
+    upgradeTimer = null;
+  };
+
+  const watchForDirect = (playId) => {
+    stopUpgradeWatch();
+    let attempts = 0;
+    upgradeTimer = setInterval(async () => {
+      attempts += 1;
+      // Serial sniffing on a small host can take two minutes for the long tail;
+      // past that the embed is the answer for this session.
+      if (closed || attempts > 18 || current?.kind !== 'embed') {
+        stopUpgradeWatch();
+        return;
+      }
+      const payload = await getPlay(playId).catch(() => null);
+      const next = payload?.source;
+      if (closed || !next || next.kind !== 'direct') return;
+      if (next.session && !canPlaySession(next)) {
+        stopUpgradeWatch();
+        return;
+      }
+      stopUpgradeWatch();
+      sources = [next];
+      toast('Direct stream ready — switched to the built-in player');
+      mountSource(0);
+    }, 7000);
+  };
+
+  /**
    * No picker, no dead end: if the direct stream fails the player drops to the
    * first embed on its own. The visitor only ever presses play.
    */
@@ -1861,6 +1901,10 @@ export async function openPlayer(item) {
       sources = [source];
     }
     mountSource(0);
+
+    // An embed means the server is still sniffing; swap to the native player
+    // when it lands instead of asking the visitor to reopen the title.
+    if (sources[0]?.kind === 'embed') watchForDirect(playId);
   }
 
   await startPlayback(item.playId ?? item.id);
