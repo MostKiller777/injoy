@@ -69,6 +69,31 @@ function rankTracks(candidates, { preferAvc = false } = {}) {
   return [...candidates].sort((a, b) => score(b) - score(a));
 }
 
+/**
+ * Audio needs a different ranking than video.
+ *
+ * Manifests list the surround mix with the highest bitrate, so a plain
+ * bandwidth sort picks E-AC-3 or AC-3. Safari has no decoder for those inside
+ * MSE: the SourceBuffer is accepted, the segments append, and the film plays
+ * silent. Only AAC in an MP4 container is dependable across iOS, iPadOS and
+ * desktop, so decodability outranks bitrate by an order of magnitude here.
+ */
+const AAC = /^mp4a\.40/i;
+const SURROUND = /^(ec-3|ac-3|ac-4|dtsc|dtsx|opus|flac)/i;
+
+function rankAudio(candidates) {
+  if (!candidates.length) return [];
+  const score = (rep) => {
+    const codecs = rep.codecs ?? '';
+    let value = rep.bandwidth ?? 0;
+    if (AAC.test(codecs)) value += 20_000_000;
+    else if (SURROUND.test(codecs)) value -= 20_000_000;
+    else value -= 5_000_000;
+    return value;
+  };
+  return [...candidates].sort((a, b) => score(b) - score(a));
+}
+
 function pickTrack(candidates, options) {
   return rankTracks(candidates, options)[0] ?? null;
 }
@@ -145,12 +170,14 @@ export function parseMpd(xml, mpdUrl) {
   if (!video.length || !audio.length) return null;
 
   const videos = rankTracks(video, { preferAvc: true });
+  const audios = rankAudio(audio);
 
   return {
     duration,
     video: videos[0],
     videos,
-    audio: pickTrack(audio),
+    audio: audios[0] ?? null,
+    audios,
   };
 }
 

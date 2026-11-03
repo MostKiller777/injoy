@@ -116,6 +116,15 @@ export function createDashFeeder(video, session, { startAt = 0, onError } = {}) 
     await new Promise((resolve) => mediaSource.addEventListener('sourceopen', resolve, { once: true }));
     if (destroyed) return;
 
+    // Check decodability before appending. Safari accepts an E-AC-3
+    // SourceBuffer and then plays the film in silence, so a rejection here is
+    // what lets the caller fall back to an embed that can actually be heard.
+    for (const track of [session.video, session.audio]) {
+      if (!MediaSource.isTypeSupported(track.mime)) {
+        throw new Error(`this browser cannot decode ${track.codecs}`);
+      }
+    }
+
     videoBuffer = mediaSource.addSourceBuffer(session.video.mime);
     audioBuffer = mediaSource.addSourceBuffer(session.audio.mime);
 
