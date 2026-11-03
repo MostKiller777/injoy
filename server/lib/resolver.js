@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { vidoraStream } from './vidora.js';
 
 /**
  * Stream resolver.
@@ -206,6 +207,12 @@ const HEDGE_MS = 5_000;
  * dead provider costs one timeout, not the whole resolution.
  */
 export async function resolveStream({ tmdbId, imdbId = null, season = null, episode = null, onAttempt = null }) {
+  // The provider's own JSON endpoint answers with a manifest in about a second
+  // and needs no browser. It is tried first so a title still resolves on a host
+  // with no Chrome, and so downloads keep working there.
+  const direct = await vidoraStream({ tmdbId, season, episode }).catch(() => null);
+  if (direct?.url) return { url: direct.url, type: direct.type, referer: direct.referer, page: direct.page, tried: direct.tried ?? [] };
+
   const pages = season && episode
     ? episodeEmbeds(tmdbId, imdbId, season, episode)
     : filmEmbeds(tmdbId, imdbId);
