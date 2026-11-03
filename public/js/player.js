@@ -1525,12 +1525,27 @@ export async function openPlayer(item) {
       muteButton.setAttribute('aria-label', video.muted ? 'Unmute' : 'Mute');
     };
 
+    /**
+     * Hardware volume buttons on iOS move `volume` but leave `muted` alone, so
+     * a film the player muted stays silent even while the user turns the phone
+     * up. Any increase while muted is an unmute request.
+     */
+    let lastVolume = video.volume > 0 ? video.volume : 1;
+    const onVolumeChange = () => {
+      if (video.muted && video.volume > lastVolume + 0.001) {
+        video.muted = false;
+        setVolume(video.volume, false);
+      }
+      lastVolume = video.volume > 0 ? video.volume : lastVolume;
+      syncVolumeIcon();
+    };
+
     on(video, 'play', syncPlayIcon);
     on(video, 'pause', syncPlayIcon);
     on(video, 'timeupdate', syncProgress);
     on(video, 'progress', syncProgress);
     on(video, 'durationchange', syncProgress);
-    on(video, 'volumechange', syncVolumeIcon);
+    on(video, 'volumechange', onVolumeChange);
     on(video, 'play', wakeChrome);
     on(video, 'pause', () => player.classList.remove('is-hidden-chrome'));
 
