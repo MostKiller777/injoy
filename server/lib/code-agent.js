@@ -67,7 +67,9 @@ function safeDir(input) {
   }
   const abs = resolve(APP_ROOT, raw);
   const rel = relative(APP_ROOT, abs).replace(/\\/g, '/');
-  if (rel.startsWith('..') || rel === '' || !ALLOWED_ROOTS.some((root) => rel.startsWith(root))) {
+  // `deploy` has to pass the same gate as `deploy/bootstrap.sh`, so compare
+  // against the root with its trailing slash stripped as well.
+  if (rel.startsWith('..') || rel === '' || !ALLOWED_ROOTS.some((root) => rel.startsWith(root) || rel === root.replace(/\/$/, ''))) {
     throw Object.assign(new Error('that path is outside the editable project files'), { status: 400 });
   }
   return { abs, rel };
@@ -108,7 +110,7 @@ function readProjectFile(path) {
 function searchProject(query, path = '.') {
   const needle = String(query ?? '').trim();
   if (needle.length < 2) throw Object.assign(new Error('search needs at least two characters'), { status: 400 });
-  const roots = path && path !== '.' ? [safePath(path).abs] : ALLOWED_ROOTS.map((root) => resolve(APP_ROOT, root));
+  const roots = path && path !== '.' ? [safeDir(path).abs] : ALLOWED_ROOTS.map((root) => resolve(APP_ROOT, root));
   const matches = [];
   const visit = (dir, depth = 0) => {
     if (depth > 6 || !existsSync(dir)) return;
@@ -405,11 +407,13 @@ async function directCodeRequest(message, { cache, admin, publicDir }) {
   const listMatch = /\b(?:list|show)\s+(?:the\s+)?(?:files?|directory)\b(?:\s+(?:in|at|under)\s+([a-z0-9_./-]+))?/i.exec(text);
   if (listMatch) {
     try {
-      const path = (listMatch[1] ?? '.').replace(/[.,;]+$/, '');
+      // Stripping the trailing period of "…in ." leaves an empty string, which
+      // means the project root, not an error.
+      const path = (listMatch[1] ?? '.').replace(/[.,;]+$/, '') || '.';
       const files = listFiles(path);
       return {
         mode: 'direct',
-        reply: files.length ? `Files in ${path}:\n${files.join('\n')}` : `${path} is empty or has no text files.`,
+        reply: files.length ? `Files in ${path === '.' ? 'the project root' : path}:\n${files.join('\n')}` : `${path} is empty or has no text files.`,
         edits: [],
       };
     } catch (err) {
