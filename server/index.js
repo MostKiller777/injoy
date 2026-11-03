@@ -278,7 +278,10 @@ const playInflight = new Map();
 const resolveCache = new Map();
 const RESOLVE_TTL = 10 * 60_000;
 const RESOLVE_NEGATIVE_TTL = 60_000;
-const PLAY_DEADLINE_MS = 4_500;
+// A direct stream is worth a short wait: the provider's own endpoint answers in
+// about a second, and the ticket endpoint occasionally takes eight. The old 4.5 s
+// cut those off and handed back an embed the player then had to replace.
+const PLAY_DEADLINE_MS = 9_000;
 
 // A resolved DASH manifest is also expensive to fetch. Cache the playable
 // record (never the per-play session id) so the second press of play is a

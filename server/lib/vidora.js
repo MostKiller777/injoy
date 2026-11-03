@@ -23,8 +23,7 @@ const FALLBACK_PLAYER_KEY = 'f3b72e73c80c9a996574379798703796a1936efa3516a7105cb
 // entry round-trips through a broken proxy often enough to skip it.
 const SOURCES = ['vjej', 'fq1k', 'nzv4', 'w7dn', 'b4tz'];
 
-const ATTEMPT_TIMEOUT_MS = 8_000;
-const TOTAL_BUDGET_MS = 20_000;
+const ATTEMPT_TIMEOUT_MS = 9_000;
 const KEY_TTL_MS = 60 * 60_000;
 
 let playerKey = FALLBACK_PLAYER_KEY;
@@ -105,24 +104,30 @@ export async function vidoraStream({ tmdbId, season = null, episode = null } = {
     ? `/v1/tv/${id}/${Number(season)}/${Number(episode)}`
     : `/v1/movie/${id}`;
 
-  const deadline = Date.now() + TOTAL_BUDGET_MS;
   let key = playerKey;
-  const tried = [];
 
-  for (const source of SOURCES) {
-    if (Date.now() > deadline) break;
-    const hit = await ask(path, source, key);
-    if (hit?.retryKey) {
-      key = await refreshPlayerKey();
-      const again = await ask(path, source, key);
-      if (again && !again.retryKey) {
-        tried.push({ source, url: again.url });
-        return { ...again, tried };
-      }
-      continue;
-    }
-    tried.push({ source, url: hit?.url ?? null });
+  // The keys are independent requests, so they run together: five serial
+  // eight-second timeouts turned a missing episode into a forty-second wait,
+  // and the player fell back to an embed before the answer arrived.
+  const attempts = await Promise.all(SOURCES.map((source) => ask(path, source, key)));
+
+  const tried = [];
+  let staleKey = false;
+  for (let at = 0; at < SOURCES.length; at += 1) {
+    const hit = attempts[at];
+    if (hit?.retryKey) staleKey = true;
+    tried.push({ source: SOURCES[at], url: hit?.url ?? null });
     if (hit?.url) return { ...hit, tried };
+  }
+
+  // One rotation is enough: refresh once and repeat the whole set.
+  if (staleKey) {
+    key = await refreshPlayerKey();
+    const retry = await Promise.all(SOURCES.map((source) => ask(path, source, key)));
+    for (let at = 0; at < SOURCES.length; at += 1) {
+      const hit = retry[at];
+      if (hit?.url) return { ...hit, tried: [...tried, { source: SOURCES[at], url: hit.url }] };
+    }
   }
 
   return { error: 'vidora had no playable source', tried };
