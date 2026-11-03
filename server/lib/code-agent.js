@@ -488,7 +488,17 @@ export async function codeChat({
   if (!config) {
     return {
       mode: 'unconfigured',
-      reply: 'No AI model is configured. Open Admin → AI settings and add a key, or run a free local model with Ollama, then come back.',
+      reply: [
+        'No model is configured, so I can only do the fixed jobs. Those work right now:',
+        '',
+        '  List the files in server/lib',
+        '  Read public/js/app.js',
+        '  Search for propose_edit',
+        '  Check server/index.js',
+        '  Run the site doctor',
+        '',
+        'Free-form explanation and code proposals need a model. Add one in Admin → AI settings (any OpenAI-compatible endpoint) and this page gets a writer as well as hands.',
+      ].join('\n'),
       edits: [],
     };
   }

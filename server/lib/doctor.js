@@ -188,11 +188,20 @@ export async function runDiagnostics({ cache = null, admin = {}, publicDir = joi
     add('series', 'Series catalogue', 'fail', err.message);
   }
 
-  // Admin auth
+  // Admin auth. A short password is only a problem once the app leaves
+  // localhost, so the check reads the actual bind address instead of the key
+  // length alone; a tunnel or a VM both count as exposed.
   const keyLength = Number(admin.length) || 0;
-  add('admin', 'Admin password',
-    keyLength === 0 ? 'fail' : keyLength < 8 ? 'warn' : 'ok',
-    keyLength === 0 ? 'No admin password configured' : `${keyLength} characters (${admin.source ?? 'unknown'}); ${keyLength < 8 ? 'use 12+ on a public host' : 'no action needed'}`);
+  const exposed = Boolean(admin.exposed);
+  if (keyLength === 0) {
+    add('admin', 'Admin password', 'fail', 'No admin password configured');
+  } else if (!exposed) {
+    add('admin', 'Admin password', 'ok', `${keyLength} characters, bound to localhost only`);
+  } else if (keyLength < 8) {
+    add('admin', 'Admin password', 'warn', `${keyLength} characters on a reachable host; use 12+ or keep it behind the tunnel only`);
+  } else {
+    add('admin', 'Admin password', 'ok', `${keyLength} characters`);
+  }
 
   // Resolver browser
   const chrome = chromePath();

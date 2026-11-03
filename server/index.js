@@ -70,6 +70,28 @@ function loadAdminKey() {
 
 const ADMIN_KEY = loadAdminKey();
 
+/**
+ * Facts the doctor and the agents are allowed to know about the admin key.
+ *
+ * `exposed` is true once the app can be reached from another machine: a
+ * non-loopback bind, or a tunnel that wrote its public URL into data/. Only the
+ * length, never the key itself, crosses this boundary.
+ */
+function adminInfo() {
+  const loopback = HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1';
+  let tunnelled = false;
+  try {
+    tunnelled = readFileSync(dataPath('public-url.txt'), 'utf8').trim().length > 0;
+  } catch {
+    // never published
+  }
+  return {
+    length: ADMIN_KEY.length,
+    source: process.env.ADMIN_KEY ? 'env' : 'file',
+    exposed: !loopback || tunnelled,
+  };
+}
+
 const cache = new Cache({ max: 1500, ttl: 60_000 });
 const imageCache = new Cache({ max: 320, ttl: 10 * 60_000 });
 const store = await new Store(DATA_FILE).load();
@@ -641,7 +663,7 @@ async function handleApi(req, res, url) {
     try {
       const diagnosis = await runDiagnostics({
         cache,
-        admin: { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' },
+        admin: adminInfo(),
         publicDir: PUBLIC_DIR,
       });
       return json(res, 200, diagnosis);
@@ -657,7 +679,7 @@ async function handleApi(req, res, url) {
       const result = await repair({
         ids: Array.isArray(body.ids) ? body.ids : [],
         cache,
-        admin: { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' },
+        admin: adminInfo(),
         publicDir: PUBLIC_DIR,
       });
       cache.clear();
@@ -695,7 +717,7 @@ async function handleApi(req, res, url) {
         message: body.message,
         history: body.history,
         cache,
-        admin: { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' },
+        admin: adminInfo(),
         publicDir: PUBLIC_DIR,
       });
       return json(res, 200, result);
@@ -730,14 +752,14 @@ async function handleApi(req, res, url) {
     if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
     try {
       const body = await readBody(req);
-      const adminInfo = { length: ADMIN_KEY.length, source: process.env.ADMIN_KEY ? 'env' : 'file' };
+      const adminFacts = adminInfo();
       const message = body.message;
       const context = body.context ?? {};
       const history = Array.isArray(body.history) ? body.history : [];
 
       let ai = null;
       try {
-        ai = await aiChat({ message, history, context, cache, admin: adminInfo, publicDir: PUBLIC_DIR });
+        ai = await aiChat({ message, history, context, cache, admin: adminFacts, publicDir: PUBLIC_DIR });
       } catch (err) {
         ai = { error: err };
       }
@@ -746,7 +768,7 @@ async function handleApi(req, res, url) {
         return json(res, 200, { ...ai, mode: 'ai' });
       }
 
-      const local = await agentChat({ message, context, cache, admin: adminInfo, publicDir: PUBLIC_DIR });
+      const local = await agentChat({ message, context, cache, admin: adminFacts, publicDir: PUBLIC_DIR });
       return json(res, 200, {
         ...local,
         mode: 'local',

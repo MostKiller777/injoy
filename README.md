@@ -150,33 +150,27 @@ With a key, detail pages for those same ids pull live TMDB metadata (cast, crew,
 
 ---
 
-## Admin and the AI agents
+## Admin, doctor and the code agent
 
 `/admin` is gated by a password — `ADMIN_KEY` in `.env`, or a generated key written to `data/admin-key.txt` if you never set one. The session is an HttpOnly, SameSite=Strict cookie valid 24 hours. Every `/api/admin/*` route checks it; a plain `curl` gets `401`.
 
-Two agents live behind that gate:
+Everything behind that gate works with **no model and no network**. The server does the work directly:
 
-- **Agent chat** (`#/admin`) — checks the site, reads logs, searches, adds and removes films, runs the 20-point doctor.
-- **Code agent** (`#/admin/code`) — lists, reads and searches the repo, explains it, finds bugs, and proposes **complete-file edits with a diff**. It never writes. You press **Apply**; the old file is backed up to `data/backups/code/<timestamp>/` first, and a failed `node --check` or `JSON.parse` rolls the file straight back. `Reject` discards the proposal.
+- **Doctor** — 20 checks: Node and Chrome, disk, catalogue counts, subtitle files, JSON validity, the admin key length, the tunnel. Everything safely repairable is repaired in place.
+- **Agent chat** (`#/admin`) — `stats`, `doctor`, `fix`, `logs`, `backup`, add and remove films, search the catalogue, open a page.
+- **Code agent** (`#/admin/code`) — `List the files in server/lib`, `Read public/js/api.js`, `Search for dwViewMatrix`, `Check server/index.js`, `Run the site doctor`. Answered straight off disk in single-digit milliseconds.
+- **Edits** — the code agent proposes **complete-file content with a diff** and never writes. You press **Apply**; the old file is backed up to `data/backups/code/<timestamp>/` first, and a failed `node --check` or `JSON.parse` rolls it straight back. `Reject` discards the proposal.
 
-Both chats persist in `localStorage` (`injoy.adminChat.v1`, `injoy.codeChat.v1`) across reloads; `Clear` in the card header wipes them. Asking about a path, a file or a search answers straight from the filesystem in single-digit milliseconds — the model only handles change and explanation.
+Both chats persist in `localStorage` (`injoy.adminChat.v1`, `injoy.codeChat.v1`) across reloads; `Clear` in the card header wipes them.
 
-**The model is free and local by default.** Install [Ollama](https://ollama.com), then:
-
-```bash
-ollama pull qwen2.5-coder:7b
-```
+**Optionally, a model.** The three `AI_*` variables in `.env` (or **Admin → AI settings**, saved to `data/ai.json`, which wins over `.env`) point the same two agents at any OpenAI-compatible endpoint. That buys free-form explanations and full-file proposals from a sentence instead of a template. Without it the agents fall back to the command set above and say so — nothing breaks, nothing nags.
 
 ```bash
-# .env
-AI_API_KEY=ollama
-AI_BASE_URL=http://127.0.0.1:11434/v1
-AI_MODEL=qwen2.5-coder:7b
+# .env, optional
+AI_API_KEY=sk-...
+AI_BASE_URL=https://api.openai.com/v1
+AI_MODEL=gpt-4o-mini
 ```
-
-Any OpenAI-compatible endpoint works instead — the same three variables, a real key, `https://api.openai.com/v1`, `gpt-4o-mini`. Settings can also be saved at runtime from **Admin → AI settings** into `data/ai.json`, which wins over `.env`. `qwen2.5-coder:3b` and `1.5b` fit machines the 7b does not.
-
-On an always-on host, `deploy/ollama.sh` does all of the above and sizes the model to the VM. `deploy/cloud-init.yaml` already calls it.
 
 ---
 
@@ -243,9 +237,7 @@ Registers a per-user scheduled task that runs `start.ps1` at every logon, restar
 
 The tunnel publishes *this* PC. For a site that answers while the PC is off, put the same app on an always-on free VM — Oracle Cloud's Always Free tier gives 4 cores, 24 GB RAM, 200 GB of disk and 10 TB of egress a month, permanently, at no cost.
 
-The fastest path is one paste: at instance creation open **Advanced options → Management → Cloud-init** and paste [`deploy/cloud-init.yaml`](deploy/cloud-init.yaml). The VM clones this public repo and provisions itself on first boot; no SSH key, no push, no process on this PC afterwards. Wait five to ten minutes and open `http://<public-ip>/`.
-
-That same paste also installs **Ollama** and sizes a local Qwen coder model to the VM's RAM (`7b` on the 24 GB shape, `3b` at 6 GB, `1.5b` below that), then points the app at it. The admin chat and the code agent work with the PC switched off, with no API key and no bill. If the model step fails the site still boots and falls back to the built-in command agent.
+The fastest path is one paste: at instance creation open **Advanced options → Management → Cloud-init** and paste [`deploy/cloud-init.yaml`](deploy/cloud-init.yaml). The VM clones this public repo and provisions itself on first boot; no SSH key, no push, no process on this PC afterwards. Wait five to ten minutes and open `http://<public-ip>/`. The doctor and the code agent work there with no model, because neither needs one.
 
 `push.ps1` is the alternative and the update path once the VM exists:
 
@@ -324,7 +316,6 @@ injoy/
     bin/cloudflared.exe fetched on first run
   deploy/
     bootstrap.sh        provision an always-on Ubuntu host: node, chrome, systemd
-    ollama.sh           free local model on the host, sized to its RAM
     push.ps1            pack this checkout, scp it, run bootstrap over ssh
     README.md           the free-forever host walkthrough
   scripts/

@@ -882,12 +882,12 @@ async function renderAdminPanel(signal, session = {}) {
   const aiSummary = el('summary', {});
 
   const paintAi = () => {
-    aiBadge.textContent = aiEnabled ? `AI · ${aiModel ?? 'model'}` : 'Command agent';
+    aiBadge.textContent = aiEnabled ? `AI · ${aiModel ?? 'model'}` : 'Built-in agent';
     aiBadge.classList.toggle('is-ai', aiEnabled);
     chatSub.textContent = aiEnabled
       ? 'Model-driven agent with site tools. Ask it to check, fix, add, remove or explain.'
-      : 'Command agent. Add an AI key below to let a language model drive it.';
-    aiSummary.textContent = aiEnabled ? `AI settings · ${aiModel ?? 'active'}` : 'AI settings · add a key';
+      : 'Built-in agent: stats, doctor, fix, logs, backups, add and remove films. No key needed.';
+    aiSummary.textContent = aiEnabled ? `Optional model · ${aiModel ?? 'active'}` : 'Optional model · none';
   };
   paintAi();
 
@@ -910,7 +910,7 @@ async function renderAdminPanel(signal, session = {}) {
     class: 'admin-ai-status',
     text: aiSource === 'env'
       ? 'Using AI_API_KEY from the environment.'
-      : aiEnabled ? 'AI key saved.' : 'No AI key yet. The command agent handles requests.',
+      : aiEnabled ? 'Model configured.' : 'No model. The built-in agent handles every command above.',
   });
   const aiSaveButton = el('button', { class: 'btn btn-primary btn-mini', type: 'submit' }, 'Save settings');
   const aiForm = el('form', { class: 'admin-ai-form' },
@@ -1120,7 +1120,7 @@ async function renderCodeAgent(signal) {
 
   const aiBadge = el('span', {
     class: session.ai ? 'agent-badge is-ai' : 'agent-badge',
-    text: session.ai ? `AI · ${session.model ?? 'model'}` : 'No model',
+    text: session.ai ? `AI · ${session.model ?? 'model'}` : 'Tools only',
   });
 
   const messages = el('div', { class: 'agent-messages', role: 'log', 'aria-live': 'polite' });
@@ -1136,7 +1136,7 @@ async function renderCodeAgent(signal) {
   let codeLog = Array.isArray(savedCode?.messages) ? savedCode.messages.slice(-60) : [];
   let savedEdits = Array.isArray(savedCode?.edits) ? savedCode.edits.slice(-20) : [];
   const seenEdits = new Set(savedEdits.map((entry) => entry.id));
-  const CODE_WELCOME = 'I can read the repo, explain code, find bugs and propose edits. I never write until you press Apply.';
+  const CODE_WELCOME = 'I can list, read and search the repo, check syntax and run the site doctor. Edits are proposed as a diff and never written until you press Apply.';
   let history = codeLog
     .filter((entry) => entry.role === 'user' || entry.role === 'agent')
     .slice(-12)
@@ -1270,7 +1270,7 @@ async function renderCodeAgent(signal) {
     void sendMessage();
   });
 
-  for (const label of ['Find a bug', 'Read server/index.js', 'Run the site doctor', 'Improve the admin CSS', 'Check player.js']) {
+  for (const label of ['Run the site doctor', 'List the files in server/lib', 'Read server/index.js', 'Search for adminAllowed', 'Check public/js/app.js']) {
     chips.append(el('button', {
       class: 'agent-chip', type: 'button',
       on: { click: () => { void sendMessage(label); } },
@@ -1293,8 +1293,8 @@ async function renderCodeAgent(signal) {
   ];
   if (!session.ai) {
     nodes.push(el('div', { class: 'admin-card code-note' },
-      el('p', { text: 'No AI model configured. Open Admin → AI settings and add a key, or run a free local model with Ollama.' }),
-      el('a', { class: 'btn btn-ghost btn-mini', href: '#/admin', text: 'Open AI settings' }),
+      el('p', { text: 'Running without a model. Listing, reading, searching, syntax checks and the site doctor work now; free-form explanations and code proposals need a model.' }),
+      el('a', { class: 'btn btn-ghost btn-mini', href: '#/admin', text: 'Add a model' }),
     ));
   }
   nodes.push(

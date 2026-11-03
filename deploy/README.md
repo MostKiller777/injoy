@@ -58,20 +58,6 @@ Wait five to ten minutes, then open `http://<public-ip>/`.
 - **AMD micro (x86_64):** the installer uses Google Chrome. The catalog fits in
   1 GB; the resolver is happier with 2 GB.
 
-The same paste then runs `deploy/ollama.sh`, which installs Ollama and pulls a
-local Qwen coder model sized to the host: `7b` at 16 GB RAM and up (the A1
-shape), `3b` at 6 GB, `1.5b` below that. The app is pointed at it over
-`127.0.0.1`, so the admin chat and the code agent work with your PC off, with no
-API key and no bill. The step is non-fatal — a 1 GB micro still boots the site,
-just with the built-in command agent instead of a model.
-
-Re-run it any time, or force a model:
-
-```bash
-sudo bash deploy/ollama.sh
-sudo AI_MODEL=qwen2.5-coder:3b bash deploy/ollama.sh
-```
-
 ### 3. Push the app (alternative, needs SSH)
 
 From this repo, on Windows:
