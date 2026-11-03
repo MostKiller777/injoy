@@ -1,11 +1,20 @@
 # injoy — zero-dependency Node server. There is no build step: the image is the
-# repo. Nothing is installed because nothing is imported outside node: itself.
+# repo. The only non-Node ingredient is Chromium, which the stream resolver
+# drives headlessly to turn a provider page into a direct video URL. Without it
+# every title falls back to an iframe embed, and an iframe's audio belongs to
+# the provider, not to this player.
 FROM node:22-alpine
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=6967 \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    CHROME_NO_SANDBOX=1
+
+# apk's chromium lands on /usr/bin/chromium-browser, which resolver.js already
+# probes. --no-sandbox comes from CHROME_NO_SANDBOX above: the container user is
+# not root and Alpine has no setuid sandbox helper.
+RUN apk add --no-cache chromium
 
 WORKDIR /app
 
