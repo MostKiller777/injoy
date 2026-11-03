@@ -1337,7 +1337,10 @@ export async function openPlayer(item) {
       event.preventDefault();
       seekToTime(video.currentTime - 10, '-10s');
     } else if (event.key.toLowerCase() === 'm') {
+      // Persist so the choice survives the next episode, and let the
+      // `volumechange` listener repaint the mute icon.
       video.muted = !video.muted;
+      setVolume(video.muted ? 0 : video.volume, video.muted);
     } else if (event.key.toLowerCase() === 'c') {
       event.preventDefault();
       if (!captionTracks.length) return;

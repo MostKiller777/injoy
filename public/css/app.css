@@ -1718,7 +1718,11 @@ kbd {
   .page-tools { width: 100%; margin-left: 0; }
   .select { flex: 1; }
   .player-head .meta { display: none; }
-  .volume-wrap { display: none; }
+  /* Phones keep the mute toggle and lose only the slider: iOS ignores
+     video.volume entirely, so a slider there is a dead control, but the
+     button is the one way to get sound back. */
+  .volume-wrap input[type="range"] { display: none; }
+  .volume-wrap .ctrl { width: 40px; height: 40px; }
   .cast-card { flex-basis: 76px; }
   .cast-card img, .cast-fallback { width: 76px; height: 94px; }
 }
