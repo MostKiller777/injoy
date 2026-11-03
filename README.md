@@ -2,6 +2,12 @@
 
 A cinema-grade streaming front end with **zero npm dependencies**. It boots on a bare Node 20 install with a hand-picked modern catalog in eight genre rails plus a full series shelf. Every title is resolved server-side, streamed direct through DASH, and cached to the box in the background so the next play comes off local disk — no source picker, no visitor downloads.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+Push this repo to GitHub, then point Render at it — the blueprint in
+[`render.yaml`](render.yaml) is complete, so it builds the `Dockerfile` and asks
+you for one password. Free plan, no card, nothing else to configure.
+
 ```
 npm start          # http://127.0.0.1:6967
 ```

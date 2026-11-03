@@ -1,27 +1,34 @@
-# Render blueprint. Point Render at this repo, pick "Blueprint", and it reads
-# this file. The disk is what makes the library and downloads survive a
-# redeploy; Render's free plan does not offer disks, so `plan: starter` is
-# required for persistence. Drop the disk and the plan for a stateless demo.
+# Render blueprint. Point Render at this repo and pick "Blueprint"; it reads
+# this file and builds the Dockerfile. Nothing else to configure.
+#
+# Free plan notes:
+#   - no persistent disk, so DATA_DIR is the container filesystem. The
+#     catalogue lives in the repo and is unaffected; watchlist, resume
+#     positions and downloaded media reset when the service redeploys.
+#   - a free service sleeps after 15 minutes idle and takes ~40s to wake.
+#
+# Want the library to persist? Change plan to `starter` and uncomment `disk`.
 services:
   - type: web
     name: injoy
     runtime: docker
-    plan: starter
+    plan: free
     region: oregon
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
       - key: HOST
         value: 0.0.0.0
-      - key: PORT
-        value: 6967
+      # Render injects PORT itself; the app reads it. Do not set it here.
       - key: DATA_DIR
         value: /data
-      # Optional TMDB key. `sync: false` means Render prompts for it instead of
-      # storing it in the repo.
+      # Prompted for once when the blueprint is created, never stored in git.
+      - key: ADMIN_KEY
+        sync: false
+      # Optional. Leave blank for the keyless curated catalogue.
       - key: TMDB_API_KEY
         sync: false
-    disk:
-      name: injoy-data
-      mountPath: /data
-      sizeGB: 5
+    # disk:
+    #   name: injoy-data
+    #   mountPath: /data
+    #   sizeGB: 5
