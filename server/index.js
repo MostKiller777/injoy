@@ -15,11 +15,11 @@ import * as catalog from './lib/catalog.js';
 import { allMedia, loadMedia, mediaFor, mediaStats, removeMedia, serveMedia } from './lib/media.js';
 import { allJobs, cancelDownload, jobFor, startDashDownload, startDownload } from './lib/downloader.js';
 import { createDashSession, loadDashManifest, openDashSession, readSegment, switchDashVariant } from './lib/dash.js';
-import { openHlsSession, readHlsSegment, switchHlsVariant } from './lib/hls.js';
+import { openHlsSession, readHlsSegment, switchHlsVariant, hlsPlaylist } from './lib/hls.js';
 import { openRawSession, readRaw } from './lib/raw.js';
 import { resolveStream } from './lib/resolver.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
-import { hlsSession, readLocalHlsSegment } from './lib/hlsstore.js';
+import { hlsSession, readLocalHlsSegment, localHlsPlaylist, readHlsManifest } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
 import { subtitleTracks, subtitleVtt } from './lib/subtitles.js';
 import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFilm } from './lib/curated.js';
@@ -1201,6 +1201,34 @@ async function handleApi(req, res, url) {
       ...SECURITY_HEADERS,
     });
     return res.end(bytes);
+  }
+
+  // native HLS playlists. iPhone Safari has no MediaSource in older builds and
+  // some webviews never expose one, but it plays HLS from a plain `video` src.
+  // Both playlists below reuse the live session, so segments stay decrypted and
+  // same-origin.
+  const nativeHlsMatch = /^\/api\/hls\/list\/([^/]+)\.m3u8$/.exec(pathname);
+  if (nativeHlsMatch && method === 'GET') {
+    const playlist = hlsPlaylist(nativeHlsMatch[1]);
+    if (!playlist) return fail(res, 404, 'session expired');
+    res.writeHead(200, {
+      'content-type': 'application/vnd.apple.mpegurl',
+      'cache-control': 'no-cache',
+      ...SECURITY_HEADERS,
+    });
+    return res.end(playlist.playlist);
+  }
+
+  const nativeLocalMatch = /^\/api\/local-hls\/([^/]+)\.m3u8$/.exec(pathname);
+  if (nativeLocalMatch && method === 'GET') {
+    const manifest = await readHlsManifest(decodeURIComponent(nativeLocalMatch[1])).catch(() => null);
+    if (!manifest) return fail(res, 404, 'not on disk');
+    res.writeHead(200, {
+      'content-type': 'application/vnd.apple.mpegurl',
+      'cache-control': 'no-cache',
+      ...SECURITY_HEADERS,
+    });
+    return res.end(localHlsPlaylist(manifest));
   }
 
   // downloaded HLS segments: one file per playlist entry, index 0 = init on fMP4

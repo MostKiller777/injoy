@@ -85,6 +85,34 @@ export async function hlsSession(id) {
   return manifest ? hlsSessionFrom(manifest) : null;
 }
 
+/**
+ * A VOD playlist for a downloaded title, pointing at this server's segment
+ * route. iPhone Safari plays HLS itself, so the phone gets the same cached file
+ * through the native player instead of falling back to an embed.
+ */
+export function localHlsPlaylist(manifest) {
+  const fmp4 = manifest.container === 'hls-fmp4';
+  const durations = manifest.durations?.length ? manifest.durations : [];
+  const longest = durations.length ? Math.max(...durations) : manifest.segmentDuration ?? 6;
+  const id = encodeURIComponent(manifest.id);
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    '#EXT-X-PLAYLIST-TYPE:VOD',
+    '#EXT-X-MEDIA-SEQUENCE:0',
+    `#EXT-X-TARGETDURATION:${Math.max(1, Math.ceil(longest))}`,
+  ];
+  if (fmp4) lines.push(`#EXT-X-MAP:URI="/api/local-hls/${id}/0"`);
+  const offset = fmp4 ? 1 : 0;
+  for (let at = 0; at < manifest.segments; at += 1) {
+    const duration = durations[at] ?? manifest.segmentDuration ?? 6;
+    lines.push(`#EXTINF:${Math.max(0.001, duration).toFixed(3)},`);
+    lines.push(`/api/local-hls/${id}/${at + offset}`);
+  }
+  lines.push('#EXT-X-ENDLIST');
+  return lines.join('\n') + '\n';
+}
+
 /** How many media segments are already on disk. */
 export async function countHlsSegments(id, ext = '.ts') {
   const names = await readdir(hlsDir(id)).catch(() => []);

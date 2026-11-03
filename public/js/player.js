@@ -1669,7 +1669,7 @@ export async function openPlayer(item) {
       const payload = await getPlay(playId).catch(() => null);
       const next = payload?.source;
       if (closed || !next || next.kind !== 'direct') return;
-      if (next.session && !canPlaySession(next)) {
+      if (next.session && !canPlaySession(next) && !nativePlaylistUrl(next, next.provider === 'local')) {
         stopUpgradeWatch();
         return;
       }
@@ -1750,16 +1750,33 @@ export async function openPlayer(item) {
         ? resume.t
         : null;
 
-      if (source.container === 'dash' && source.session) {
+      // iPhone plays HLS itself, and any browser without MediaSource does too.
+      // The server serves a playlist over the same session, so the segments
+      // stay decrypted and same-origin and the phone gets the real player
+      // chrome instead of an embed.
+      const nativeUrl = nativePlaylistUrl(source, local);
+
+      if (nativeUrl) {
+        video.src = nativeUrl;
+        if (resumePoint) {
+          on(video, 'loadedmetadata', () => {
+            try { video.currentTime = resumePoint; } catch { /* seek refused */ }
+          }, { once: true });
+        }
+        detachStream = () => {
+          try {
+            video.removeAttribute('src');
+            video.load();
+          } catch { /* the element is gone */ }
+        };
+      } else if (source.container === 'dash' && source.session) {
         detachStream = createDashFeeder(video, source.session, {
           startAt: resumePoint ?? 0,
           onError: (err) => { fallbackToEmbed(err.message); },
         });
-      }
-
-      // HLS arrives muxed — one segment list, one SourceBuffer. The feeder owns
-      // the read-ahead window and the seek restart; the element only plays.
-      if ((source.container === 'hls' || source.container === 'hls-fmp4') && source.session) {
+      } else if ((source.container === 'hls' || source.container === 'hls-fmp4') && source.session) {
+        // HLS arrives muxed — one segment list, one SourceBuffer. The feeder
+        // owns the read-ahead window and the seek restart; the element plays.
         detachStream = createHlsFeeder(video, source.session, {
           startAt: resumePoint ?? 0,
           onError: (err) => { fallbackToEmbed(err.message); },
@@ -1768,9 +1785,7 @@ export async function openPlayer(item) {
           fallbackToEmbed('This browser cannot decode the direct stream.');
           return;
         }
-      }
-
-      if (isTransportStream) {
+      } else if (isTransportStream) {
         detachStream = createTransportStreamFeeder(video, source.url, {
           duration: source.duration ?? null,
           bytes: source.bytes ?? null,
@@ -1882,9 +1897,10 @@ export async function openPlayer(item) {
       return;
     }
 
-    // A browser without the right MSE codec cannot take the direct stream; drop
-    // to the embed before mounting instead of after a black frame.
-    if (source.session && !canPlaySession(source)) {
+    // A browser without the right MSE codec cannot feed a SourceBuffer, but
+    // iPhone plays HLS itself — only a session with no native path drops to an
+    // embed.
+    if (source.session && !canPlaySession(source) && !nativePlaylistUrl(source, source.provider === 'local')) {
       await fallbackToEmbed('This browser cannot decode the direct stream.');
       return;
     }
@@ -1936,6 +1952,30 @@ function canPlaySession(source) {
   } catch {
     return false;
   }
+}
+
+// iPhone and iPad play HLS from the element itself. Their MediaSource is
+// either missing or refuses the transport-stream type, so the native path is
+// preferred there instead of being treated as a decode failure.
+const NATIVE_HLS = (() => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  return /Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1;
+})();
+
+/**
+ * The playlist URL to hand a browser that plays HLS natively, or null when the
+ * MSE feeder is the right path. Sessions carry either a `sid` (live proxy) or a
+ * local `base`; both have a playlist route behind them.
+ */
+function nativePlaylistUrl(source, local) {
+  const session = source?.session;
+  if (!session) return null;
+  if (!/^hls/.test(source.container ?? '')) return null;
+  if (!NATIVE_HLS && canPlaySession(source)) return null;
+  if (local) return `${session.base}.m3u8`;
+  return session.sid ? `/api/hls/list/${session.sid}.m3u8` : null;
 }
 
 export function closePlayer() {

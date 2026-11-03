@@ -467,3 +467,38 @@ export function hlsSessionFor(sid) {
   const session = sessions.get(String(sid));
   return session ? { sid, segments: session.segments.length, duration: session.duration } : null;
 }
+
+/**
+ * A VOD playlist pointing at this server's own segment route.
+ *
+ * iPhone Safari has no `MediaSource` before 17.1 and none in some embedded
+ * webviews, but it plays HLS natively through the `video` element. Handing it a
+ * rewritten playlist keeps the phone on the same session, the same decrypted
+ * segments and the same player chrome as every other browser.
+ */
+export function hlsPlaylist(sid) {
+  const session = sessions.get(String(sid));
+  if (!session) return null;
+
+  const lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-MEDIA-SEQUENCE:0'];
+  const durations = session.durations?.length ? session.durations : [];
+  const longest = durations.length ? Math.max(...durations) : session.segmentDuration ?? 6;
+  lines.push(`#EXT-X-TARGETDURATION:${Math.max(1, Math.ceil(longest))}`);
+
+  // index 0 is the init segment when the playlist carries one, segments follow.
+  if (session.map) lines.push(`#EXT-X-MAP:URI="/api/hls/seg/${sid}/0"`);
+
+  const offset = session.map ? 1 : 0;
+  for (let at = 0; at < session.segments.length; at += 1) {
+    const duration = durations[at] ?? session.segmentDuration ?? 6;
+    lines.push(`#EXTINF:${Math.max(0.001, duration).toFixed(3)},`);
+    lines.push(`/api/hls/seg/${sid}/${at + offset}`);
+  }
+  lines.push('#EXT-X-ENDLIST');
+
+  return {
+    playlist: lines.join('\n') + '\n',
+    duration: session.duration,
+    contentType: session.map ? 'video/mp4' : 'video/mp2t',
+  };
+}
