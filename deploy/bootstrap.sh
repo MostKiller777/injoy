@@ -14,16 +14,25 @@
 #   DOMAIN=          optional; installs Caddy in front and gets a free
 #                    Let's Encrypt certificate for that name
 #   MEDIA_CACHE_GB=  default 40; the disk budget for cached films
+#   ADMIN_KEY=       optional; the admin password. Without it the app makes a
+#                    random one and writes it to /var/lib/injoy/admin-key.txt.
+#                    Keep it 12+ characters on a public host.
 #
 set -euo pipefail
 
 PORT="${PORT:-80}"
 DOMAIN="${DOMAIN:-}"
 MEDIA_CACHE_GB="${MEDIA_CACHE_GB:-40}"
+ADMIN_KEY="${ADMIN_KEY:-}"
 SRC="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 APP_DIR=/opt/injoy
 DATA_DIR=/var/lib/injoy
 SERVICE_USER=injoy
+
+ADMIN_KEY_UNIT=""
+if [ -n "$ADMIN_KEY" ]; then
+  ADMIN_KEY_UNIT="Environment=ADMIN_KEY=$ADMIN_KEY"
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "run me with sudo" >&2
@@ -115,6 +124,7 @@ Environment=HOST=0.0.0.0
 Environment=PORT=$PORT
 Environment=DATA_DIR=$DATA_DIR
 Environment=MEDIA_CACHE_GB=$MEDIA_CACHE_GB
+$ADMIN_KEY_UNIT
 # The service account cannot use Chrome's sandbox on this host; the resolver
 # still sniffs the stream, it just runs the browser unsandboxed.
 Environment=CHROME_NO_SANDBOX=1
@@ -185,6 +195,11 @@ for _ in $(seq 1 40); do
     echo "  service   systemctl status injoy"
     echo "  logs      journalctl -u injoy -f"
     echo "  data      $DATA_DIR"
+    if [ -n "$ADMIN_KEY" ]; then
+      echo "  admin     the ADMIN_KEY you passed to this script"
+    else
+      echo "  admin     cat $DATA_DIR/admin-key.txt"
+    fi
     echo ""
     exit 0
   fi

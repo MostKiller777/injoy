@@ -9,6 +9,10 @@
 # The instance clones the public repository and runs deploy/bootstrap.sh, which
 # installs Node 22 and a headless browser, creates the injoy service, opens the
 # local firewall and starts the app on port 80. It comes back after a reboot.
+#
+# TWO THINGS TO EDIT BELOW IF YOU NEED TO:
+#   1. the clone URL, if your repository is not MostKiller777/injoy
+#   2. ADMIN_KEY, if you want a password other than the generated one
 
 package_update: true
 package_upgrade: false
@@ -25,11 +29,19 @@ write_files:
       #!/usr/bin/env bash
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
+
+      # (1) repository - must be public, the clone has no credentials
+      REPO=https://github.com/MostKiller777/injoy.git
+
+      # (2) admin password - leave empty to let the app generate one and write
+      # it to /var/lib/injoy/admin-key.txt
+      ADMIN_KEY=181
+
       rm -rf /tmp/injoy
-      git clone --depth 1 https://github.com/MostKiller777/injoy.git /tmp/injoy
-      bash /tmp/injoy/deploy/bootstrap.sh /tmp/injoy
+      git clone --depth 1 "$REPO" /tmp/injoy
+      ADMIN_KEY="$ADMIN_KEY" bash /tmp/injoy/deploy/bootstrap.sh /tmp/injoy
 
 runcmd:
   - [ bash, /usr/local/bin/injoy-first-boot ]
 
-final_message: "injoy first boot finished - open http://<this-host-public-ip>/ on port 80, admin password in /var/lib/injoy/admin-key.txt"
+final_message: "injoy first boot finished - open http://<this-host-public-ip>/ on port 80"
