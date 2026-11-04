@@ -98,6 +98,19 @@ async function ask(path, source, key) {
  * source key declined. Callers treat a miss as "nothing to see here" and keep
  * walking their own provider list.
  */
+const LANG_CACHE = new Map();
+
+/** Language of a manifest, remembered per URL so a replay costs nothing. */
+async function languageOf(hit) {
+  const key = hit.url;
+  const cached = LANG_CACHE.get(key);
+  if (cached !== undefined) return cached;
+  const lang = await manifestAudioLanguage(hit.url, hit.referer).catch(() => null);
+  if (LANG_CACHE.size > 400) LANG_CACHE.clear();
+  LANG_CACHE.set(key, lang);
+  return lang;
+}
+
 /**
  * Pick the candidate whose default audio is English.
  *
@@ -105,16 +118,25 @@ async function ask(path, source, key) {
  * dual-audio releases whose first PID is a dub. Silence is worse than a slower
  * start, so each candidate's first segment is read and the PMT decides; an
  * unreadable candidate counts as acceptable rather than being skipped.
+ *
+ * The first candidate is probed alone because it is usually the answer; only
+ * when it is not English are the rest read at once.
  */
 async function preferEnglish(hits, prefer) {
   // An explicit key from the viewer is a decision, not a suggestion.
   if (prefer) return hits[0];
 
-  for (const hit of hits) {
-    const lang = await manifestAudioLanguage(hit.url, hit.referer).catch(() => null);
-    if (!lang || lang === 'eng' || lang === 'en' || lang === 'und') return hit;
+  const first = hits[0];
+  const firstLang = await languageOf(first);
+  if (!firstLang || firstLang === 'eng' || firstLang === 'en' || firstLang === 'und') return first;
+
+  const rest = hits.slice(1);
+  const langs = await Promise.all(rest.map((hit) => languageOf(hit)));
+  for (let at = 0; at < rest.length; at += 1) {
+    const lang = langs[at];
+    if (!lang || lang === 'eng' || lang === 'en' || lang === 'und') return rest[at];
   }
-  return hits[0];
+  return first;
 }
 
 export async function vidoraStream({ tmdbId, season = null, episode = null, prefer = null } = {}) {
