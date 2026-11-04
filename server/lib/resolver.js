@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { vidoraStream } from './vidora.js';
+import { videasyStream } from './videasy.js';
 
 /**
  * Stream resolver.
@@ -212,6 +213,11 @@ export async function resolveStream({ tmdbId, imdbId = null, season = null, epis
   // with no Chrome, and so downloads keep working there.
   const direct = await vidoraStream({ tmdbId, season, episode }).catch(() => null);
   if (direct?.url) return { url: direct.url, type: direct.type, referer: direct.referer, page: direct.page, tried: direct.tried ?? [] };
+
+  // Second backend for the titles the first one does not carry. A miss here is
+  // free: the lookup is short and the browser pass below still runs.
+  const alt = await videasyStream({ tmdbId, imdbId, season, episode }).catch(() => null);
+  if (alt?.url) return { url: alt.url, type: alt.type, referer: alt.referer, page: alt.page, tried: [{ source: 'videasy', url: alt.url }] };
 
   const pages = season && episode
     ? episodeEmbeds(tmdbId, imdbId, season, episode)
