@@ -147,12 +147,14 @@ function referrerHost(value) {
 // datacenter immediately), so the lookup walks the list instead of trusting a
 // single host.
 const GEO_PROVIDERS = [
+  // ipinfo answers with a city as well as a country and is the quickest of the
+  // five; the rest are there for when it starts refusing a datacenter address.
   async (ip, signal) => {
-    const res = await fetch(`https://api.country.is/${encodeURIComponent(ip)}`, { signal });
-    if (!res.ok) throw new Error(`country.is ${res.status}`);
+    const res = await fetch(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { signal, headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error(`ipinfo ${res.status}`);
     const body = await res.json();
-    if (!body?.country) throw new Error('country.is empty');
-    return { country: body.country, code: String(body.country).toUpperCase(), city: null };
+    if (!body?.country) throw new Error('ipinfo empty');
+    return { country: body.country, code: String(body.country).toUpperCase(), city: body.city ?? null };
   },
   async (ip, signal) => {
     const res = await fetch(`https://freeipapi.com/api/json/${encodeURIComponent(ip)}`, { signal });
@@ -162,18 +164,18 @@ const GEO_PROVIDERS = [
     return { country: body.countryName ?? body.countryCode, code: String(body.countryCode).toUpperCase(), city: body.cityName ?? null };
   },
   async (ip, signal) => {
+    const res = await fetch(`https://api.country.is/${encodeURIComponent(ip)}`, { signal });
+    if (!res.ok) throw new Error(`country.is ${res.status}`);
+    const body = await res.json();
+    if (!body?.country) throw new Error('country.is empty');
+    return { country: body.country, code: String(body.country).toUpperCase(), city: null };
+  },
+  async (ip, signal) => {
     const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, { signal });
     if (!res.ok) throw new Error(`ipwho ${res.status}`);
     const body = await res.json();
     if (!body?.success) throw new Error('ipwho refused');
     return { country: body.country ?? 'Unknown', code: String(body.country_code ?? '--').toUpperCase(), city: body.city ?? null };
-  },
-  async (ip, signal) => {
-    const res = await fetch(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { signal, headers: { accept: 'application/json' } });
-    if (!res.ok) throw new Error(`ipinfo ${res.status}`);
-    const body = await res.json();
-    if (!body?.country) throw new Error('ipinfo empty');
-    return { country: body.country, code: String(body.country).toUpperCase(), city: body.city ?? null };
   },
   async (ip, signal) => {
     const res = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, { signal, headers: { accept: 'application/json' } });
