@@ -1923,8 +1923,20 @@ export async function openPlayer(item) {
     // The server decides everything: a local copy, a live direct stream, or one
     // embed. There is no source list in the player and nothing for the visitor
     // to pick.
-    const payload = await getPlay(playId, undefined, preferredSrc).catch((err) => ({ error: err }));
+    let payload = await getPlay(playId, undefined, preferredSrc).catch((err) => ({ error: err }));
     if (closed) return;
+
+    // A cold title can beat the resolver: the first answer is an embed while the
+    // provider lookup is still running. Asking again beats dropping the viewer
+    // into an iframe that gets replaced eight seconds later, so the spinner
+    // stays up and the question is repeated before anything is mounted.
+    for (let attempt = 0; attempt < 3 && payload?.source?.kind === 'embed'; attempt += 1) {
+      headMeta.textContent = attempt < 2 ? 'finding the best source…' : 'preparing…';
+      await new Promise((resolve) => { setTimeout(resolve, 4000); });
+      if (closed) return;
+      payload = await getPlay(playId, undefined, preferredSrc).catch(() => payload);
+      if (closed) return;
+    }
 
     if (payload.error) {
       showStatus('Could not start playback', payload.error.message, false);
