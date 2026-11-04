@@ -782,7 +782,7 @@ async function renderAdminPanel(signal, session = {}) {
     return button;
   });
 
-  const barList = (target, rows, { suffix = '', empty = 'Nothing yet.' } = {}) => {
+  const barList = (target, rows, { empty = 'Nothing yet.' } = {}) => {
     target.replaceChildren();
     if (!rows.length) {
       target.append(el('p', { class: 'traffic-empty', text: empty }));
@@ -790,12 +790,13 @@ async function renderAdminPanel(signal, session = {}) {
     }
     const peak = Math.max(...rows.map((row) => row.count), 1);
     for (const row of rows) {
+      const value = row.share === undefined ? String(row.count) : `${row.count} · ${row.share}%`;
       target.append(el('div', { class: 'traffic-row' },
         el('span', { class: 'traffic-row-name', text: row.name, title: row.name }),
         el('span', { class: 'traffic-row-bar' },
           el('span', { class: 'traffic-row-fill', style: `width:${Math.max(4, Math.round((row.count / peak) * 100))}%` }),
         ),
-        el('span', { class: 'traffic-row-value', text: `${row.count}${suffix}` }),
+        el('span', { class: 'traffic-row-value', text: value }),
       ));
     }
   };
@@ -828,8 +829,9 @@ async function renderAdminPanel(signal, session = {}) {
     )));
 
     barList(trafficCountries, range.countries.map((row) => ({
-      name: `${row.name} · ${row.share}%`,
+      name: row.name,
       count: row.count,
+      share: row.share,
     })), { empty: 'No countries recorded yet.' });
 
     barList(trafficTitles, range.titles.map((row) => ({ name: row.name, count: row.count })), { empty: 'No plays yet.' });

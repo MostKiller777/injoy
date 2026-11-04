@@ -22,14 +22,6 @@ const GEO_TIMEOUT_MS = 2_500;
 const GEO_TTL_MS = 24 * 60 * 60_000;
 const GEO_CACHE_MAX = 2_000;
 
-const GEO_FIELDS = [
-  'status',
-  'country',
-  'countryCode',
-  'regionName',
-  'city',
-];
-
 let state = { salt: null, days: {} };
 let loaded = false;
 let dirty = false;
@@ -103,11 +95,33 @@ function prune() {
 }
 
 function clientIp(req) {
-  const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-  return forwarded || req.socket?.remoteAddress || '';
+  const header = [
+    req.headers['cf-connecting-ip'],
+    req.headers['true-client-ip'],
+    req.headers['x-real-ip'],
+    String(req.headers['x-forwarded-for'] ?? '').split(',')[0],
+    req.socket?.remoteAddress,
+  ];
+  for (const raw of header) {
+    const ip = String(raw ?? '').trim();
+    if (!ip) continue;
+    // Render and Cloudflare both prepend the client and append their own hops;
+    // the first public address in the chain is the visitor.
+    if (!LOCAL.test(ip)) return ip.replace(/^::ffff:/, '');
+  }
+  const fallback = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
+  return fallback;
 }
 
-const LOCAL = /^(::1|127\.|::ffff:127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+const LOCAL = /^(::1|127\.|::ffff:127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fc|fd|fe80)/i;
+
+/** "🇺🇸 United States" — a flag makes a country list readable at a glance. */
+function countryLabel(code, name) {
+  if (!name || name === 'Unknown') return 'Unknown';
+  if (!code || code.length !== 2 || !/^[A-Z]{2}$/.test(code)) return name;
+  const flag = String.fromCodePoint(...[...code].map((letter) => 0x1f1e6 + letter.charCodeAt(0) - 65));
+  return `${flag} ${name}`;
+}
 
 function deviceOf(ua) {
   if (!ua) return 'other';
@@ -134,29 +148,50 @@ async function geoFor(ip) {
   const cached = geoCache.get(ip);
   if (cached && Date.now() - cached.at < GEO_TTL_MS) return cached.value;
 
+  // Two providers, both free and keyless. A datacenter address is sometimes
+  // refused by one and answered by the other, so a miss on the first is not a
+  // miss overall.
+  const providers = [
+    async () => {
+      const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, { signal: signalFor() });
+      if (!res.ok) throw new Error(`ipwho ${res.status}`);
+      const body = await res.json();
+      if (!body?.success) throw new Error('ipwho refused');
+      return { country: body.country ?? 'Unknown', code: String(body.country_code ?? '--').toUpperCase(), city: body.city ?? null };
+    },
+    async () => {
+      const res = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, { signal: signalFor(), headers: { accept: 'application/json' } });
+      if (!res.ok) throw new Error(`ipapi ${res.status}`);
+      const body = await res.json();
+      if (body?.error) throw new Error('ipapi refused');
+      return { country: body.country_name ?? 'Unknown', code: String(body.country_code ?? '--').toUpperCase(), city: body.city ?? null };
+    },
+  ];
+
+  for (const provider of providers) {
+    try {
+      const value = await provider();
+      if (geoCache.size > GEO_CACHE_MAX) geoCache.clear();
+      geoCache.set(ip, { at: Date.now(), value });
+      return value;
+    } catch {
+      // next provider
+    }
+  }
+
+  const value = { country: 'Unknown', code: '--', city: null };
+  // A failed lookup is remembered briefly: retrying every view would hammer the
+  // providers for an address that is not going to resolve.
+  geoCache.set(ip, { at: Date.now() - GEO_TTL_MS + 10 * 60_000, value });
+  return value;
+}
+
+function signalFor() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), GEO_TIMEOUT_MS);
   timer.unref?.();
-  try {
-    const res = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=${GEO_FIELDS.join(',')}`, {
-      signal: controller.signal,
-      headers: { accept: 'application/json' },
-    });
-    if (!res.ok) throw new Error(`geo ${res.status}`);
-    const body = await res.json();
-    const value = body?.status === 'success'
-      ? { country: body.country ?? 'Unknown', code: body.countryCode ?? '--', city: body.city ?? null }
-      : { country: 'Unknown', code: '--', city: null };
-    if (geoCache.size > GEO_CACHE_MAX) geoCache.clear();
-    geoCache.set(ip, { at: Date.now(), value });
-    return value;
-  } catch {
-    const value = { country: 'Unknown', code: '--', city: null };
-    geoCache.set(ip, { at: Date.now(), value });
-    return value;
-  } finally {
-    clearTimeout(timer);
-  }
+  controller.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+  return controller.signal;
 }
 
 /**
@@ -194,11 +229,13 @@ export async function record(req, { kind = 'view', path = '/', title = null } = 
   prune();
   scheduleFlush();
 
-  if (kind !== 'route') {
+  // Country is a property of the visitor, not of the event: counting it on a
+  // play as well would push a single person past 100 % of the day's visitors.
+  if (kind === 'view') {
     void geoFor(ip).then((geo) => {
       const slot = state.days[today] ??= blankDay();
-      bump(slot.countries, geo.country);
-      if (geo.city) bump(slot.cities, `${geo.country} · ${geo.city}`);
+      bump(slot.countries, countryLabel(geo.code, geo.country));
+      if (geo.city && geo.country !== 'Unknown') bump(slot.cities, `${countryLabel(geo.code, geo.country)} · ${geo.city}`);
       scheduleFlush();
     });
   }
@@ -278,7 +315,11 @@ export async function report(days = 1) {
       visitors: todayTotals.visitors,
       views: todayTotals.views,
       plays: todayTotals.plays,
-      countries: top({ ...todayTotals.countries }, 6),
+      countries: top({ ...todayTotals.countries }, 6).map((entry) => ({
+        ...entry,
+        share: todayTotals.visitors ? Math.round((entry.count / todayTotals.visitors) * 1000) / 10 : 0,
+      })),
+      cities: top({ ...todayTotals.cities }, 4),
       devices: top({ ...todayTotals.devices }, 3),
     },
     range: {
