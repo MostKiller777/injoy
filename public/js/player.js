@@ -425,6 +425,9 @@ export async function openPlayer(item) {
   let bigPlay = null;
   let sources = [];
   let current = null;
+  // The provider key the viewer last chose for the audio mix. Empty means the
+  // server's own order.
+  let preferredSrc = null;
   let saveTimer = null;
   let hideTimer = null;
   let noteTimer = null;
@@ -1429,6 +1432,26 @@ export async function openPlayer(item) {
     const pipButton = el('button', { class: 'ctrl', type: 'button', 'aria-label': 'Picture in picture' }, icon('pip'));
     const fsButton = el('button', { class: 'ctrl', type: 'button', 'data-fs': '', 'aria-label': 'Fullscreen' }, icon('fullscreen'));
 
+    // Each provider key carries its own encode of the film, so the same title
+    // can be a dub on one host and the original on another. Nothing in the
+    // response says which is which, so the viewer gets a cycle instead of a
+    // guess: press, the title re-resolves on the next key, and the playhead is
+    // restored from saved progress.
+    const audioButton = current?.provider === 'direct' && !current?.session?.local
+      ? el('button', {
+          class: 'pill-select', type: 'button', 'aria-label': 'Try another audio mix',
+          on: {
+            click: () => {
+              const at = AUDIO_KEYS.indexOf(preferredSrc);
+              preferredSrc = AUDIO_KEYS[(at + 1) % AUDIO_KEYS.length];
+              if (video) saveProgress(item.id, video.currentTime, video.duration);
+              closePlayer();
+              openPlayer(item);
+            },
+          },
+        }, icon('volume'), el('span', { text: 'Audio' }))
+      : null;
+
     const scrubTo = (clientX) => {
       const rect = seek.getBoundingClientRect();
       const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
@@ -1577,6 +1600,7 @@ export async function openPlayer(item) {
         }, icon('fwd10')),
         el('div', { class: 'volume-wrap' }, muteButton, volume),
         speedButton,
+        audioButton,
         qualityButton,
         episodesButton,
         captionSlot = el('span', { class: 'caption-slot' }),
@@ -1672,7 +1696,7 @@ export async function openPlayer(item) {
         stopUpgradeWatch();
         return;
       }
-      const payload = await getPlay(playId).catch(() => null);
+      const payload = await getPlay(playId, undefined, preferredSrc).catch(() => null);
       const next = payload?.source;
       if (closed || !next || next.kind !== 'direct') return;
       if (next.session && !canPlaySession(next) && !nativePlaylistUrl(next, next.provider === 'local')) {
@@ -1899,7 +1923,7 @@ export async function openPlayer(item) {
     // The server decides everything: a local copy, a live direct stream, or one
     // embed. There is no source list in the player and nothing for the visitor
     // to pick.
-    const payload = await getPlay(playId).catch((err) => ({ error: err }));
+    const payload = await getPlay(playId, undefined, preferredSrc).catch((err) => ({ error: err }));
     if (closed) return;
 
     if (payload.error) {
@@ -1950,6 +1974,8 @@ export async function openPlayer(item) {
   // running underneath; dismissing the drawer leaves you on the episode.
   if (seasons.length) toggleEpisodes(true);
 }
+
+const AUDIO_KEYS = ['vjej', 'fq1k', 'nzv4', 'w7dn', 'b4tz'];
 
 /**
  * MSE needs a SourceBuffer type the decoder accepts. HEVC is the common case on

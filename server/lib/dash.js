@@ -89,6 +89,10 @@ function rankAudio(candidates) {
     if (AAC.test(codecs)) value += 20_000_000;
     else if (SURROUND.test(codecs)) value -= 20_000_000;
     else value -= 5_000_000;
+    // Language outranks bitrate: a clean 640 kbps dub is still the wrong voice.
+    const lang = String(rep.lang ?? '').toLowerCase();
+    if (/^(en|eng|en[-_]|english)/.test(lang)) value += 60_000_000;
+    else if (lang && !/^(und|unknown|mul)/.test(lang)) value -= 60_000_000;
     return value;
   };
   return [...candidates].sort((a, b) => score(b) - score(a));
@@ -149,6 +153,10 @@ export function parseMpd(xml, mpdUrl) {
         repId,
         codecs: repAttrs.codecs ?? (kind === 'audio' ? 'mp4a.40.2' : 'avc1.4d401f'),
         bandwidth: Number(repAttrs.bandwidth ?? 0),
+        // Multi-language manifests declare one AdaptationSet per language. The
+        // ranking below keeps English ahead of a dub; without this a Hindi or
+        // Tamil track wins on codec alone and the film speaks the wrong voice.
+        lang: String(setAttrs.lang ?? repAttrs.lang ?? '').toLowerCase(),
         width: Number(repAttrs.width ?? 0),
         height: Number(repAttrs.height ?? 0),
         // A subtitle timed for 25 fps drifts against a 23.976 fps master. The

@@ -96,7 +96,7 @@ async function ask(path, source, key) {
  * source key declined. Callers treat a miss as "nothing to see here" and keep
  * walking their own provider list.
  */
-export async function vidoraStream({ tmdbId, season = null, episode = null } = {}) {
+export async function vidoraStream({ tmdbId, season = null, episode = null, prefer = null } = {}) {
   const id = Number(tmdbId);
   if (!Number.isFinite(id) || id <= 0) return { error: 'no tmdb id' };
 
@@ -104,29 +104,37 @@ export async function vidoraStream({ tmdbId, season = null, episode = null } = {
     ? `/v1/tv/${id}/${Number(season)}/${Number(episode)}`
     : `/v1/movie/${id}`;
 
+  // `prefer` is the viewer asking for a different audio mix: the providers each
+  // carry their own encode, so the same film can be a dub on one key and the
+  // original on another. Rotation keeps that choice first without losing the
+  // others as fallbacks.
+  const order = prefer && SOURCES.includes(prefer)
+    ? [prefer, ...SOURCES.filter((key) => key !== prefer)]
+    : SOURCES;
+
   let key = playerKey;
 
   // The keys are independent requests, so they run together: five serial
   // eight-second timeouts turned a missing episode into a forty-second wait,
   // and the player fell back to an embed before the answer arrived.
-  const attempts = await Promise.all(SOURCES.map((source) => ask(path, source, key)));
+  const attempts = await Promise.all(order.map((source) => ask(path, source, key)));
 
   const tried = [];
   let staleKey = false;
-  for (let at = 0; at < SOURCES.length; at += 1) {
+  for (let at = 0; at < order.length; at += 1) {
     const hit = attempts[at];
     if (hit?.retryKey) staleKey = true;
-    tried.push({ source: SOURCES[at], url: hit?.url ?? null });
+    tried.push({ source: order[at], url: hit?.url ?? null });
     if (hit?.url) return { ...hit, tried };
   }
 
   // One rotation is enough: refresh once and repeat the whole set.
   if (staleKey) {
     key = await refreshPlayerKey();
-    const retry = await Promise.all(SOURCES.map((source) => ask(path, source, key)));
-    for (let at = 0; at < SOURCES.length; at += 1) {
+    const retry = await Promise.all(order.map((source) => ask(path, source, key)));
+    for (let at = 0; at < order.length; at += 1) {
       const hit = retry[at];
-      if (hit?.url) return { ...hit, tried: [...tried, { source: SOURCES[at], url: hit.url }] };
+      if (hit?.url) return { ...hit, tried: [...tried, { source: order[at], url: hit.url }] };
     }
   }
 

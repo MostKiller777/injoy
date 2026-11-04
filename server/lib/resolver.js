@@ -207,11 +207,11 @@ const HEDGE_MS = 5_000;
  * full timeout when it does not. Each attempt is a fresh headless browser, so a
  * dead provider costs one timeout, not the whole resolution.
  */
-export async function resolveStream({ tmdbId, imdbId = null, season = null, episode = null, onAttempt = null }) {
+export async function resolveStream({ tmdbId, imdbId = null, season = null, episode = null, onAttempt = null, prefer = null }) {
   // The provider's own JSON endpoint answers with a manifest in about a second
   // and needs no browser. It is tried first so a title still resolves on a host
   // with no Chrome, and so downloads keep working there.
-  const direct = await vidoraStream({ tmdbId, season, episode }).catch(() => null);
+  const direct = await vidoraStream({ tmdbId, season, episode, prefer }).catch(() => null);
   if (direct?.url) return { url: direct.url, type: direct.type, referer: direct.referer, page: direct.page, tried: direct.tried ?? [] };
 
   // Second backend for the titles the first one does not carry. A miss here is

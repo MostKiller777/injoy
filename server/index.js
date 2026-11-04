@@ -294,6 +294,7 @@ const resolveKey = (target) => [
   target.imdbId ?? '',
   target.season ?? '',
   target.episode ?? '',
+  target.src ?? '',
 ].join('|');
 
 async function resolveUpstream(target) {
@@ -301,7 +302,13 @@ async function resolveUpstream(target) {
   const hit = resolveCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) return hit.value;
 
-  const value = await resolveStream(target);
+  const value = await resolveStream({
+    tmdbId: target.tmdbId,
+    imdbId: target.imdbId,
+    season: target.season,
+    episode: target.episode,
+    prefer: target.src ?? null,
+  });
   if (resolveCache.size > 500) resolveCache.clear();
   resolveCache.set(key, {
     at: Date.now(),
@@ -919,6 +926,9 @@ async function handleApi(req, res, url) {
   const playMatch = /^\/api\/play\/(.+)$/.exec(pathname);
   if (playMatch && method === 'GET') {
     const id = decodeURIComponent(playMatch[1]);
+    // `?src=` is the viewer cycling the provider's encode: each source key ships
+    // its own file, so one may carry a dub where another has the original mix.
+    const src = new URL(req.url ?? '/', 'http://local').searchParams.get('src');
 
     // A copy on disk always wins: it seeks, it resumes, it needs no network.
     const media = mediaFor(id);
@@ -981,12 +991,14 @@ async function handleApi(req, res, url) {
     if (!meta) return fail(res, 404, 'title not found');
     const target = streamTarget(id, meta);
     if (!target) return fail(res, 404, 'title not found');
+    if (src) target.src = src;
 
-    let pending = playInflight.get(id);
+    const inflightKey = src ? `${id}|${src}` : id;
+    let pending = playInflight.get(inflightKey);
     if (!pending) {
       pending = resolvePlayable(id, target).catch((err) => ({ ok: false, error: err.message }));
-      playInflight.set(id, pending);
-      pending.finally(() => playInflight.delete(id));
+      playInflight.set(inflightKey, pending);
+      pending.finally(() => playInflight.delete(inflightKey));
     }
     // A provider sniff that takes longer than a few seconds should not keep the
     // visitor staring at "Preparing stream". The embed is mounted instead, and
