@@ -17,7 +17,8 @@ import { allJobs, cancelDownload, jobFor, startDashDownload, startDownload } fro
 import { createDashSession, loadDashManifest, openDashSession, readSegment, switchDashVariant } from './lib/dash.js';
 import { openHlsSession, readHlsSegment, switchHlsVariant, hlsPlaylist } from './lib/hls.js';
 import { openRawSession, readRaw } from './lib/raw.js';
-import { resolveStream } from './lib/resolver.js';
+import { resolveStream, chromePath } from './lib/resolver.js';
+import { manifestAudioLanguage } from './lib/tslang.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
 import { hlsSession, readLocalHlsSegment, localHlsPlaylist, readHlsManifest } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
@@ -702,6 +703,34 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/admin/ai' && method === 'GET') {
     if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
     return json(res, 200, aiStatus());
+  }
+
+  // Why a title is not direct, from the inside: which providers answered, what
+  // language each one speaks, and what the error was. Admin only.
+  if (pathname === '/api/admin/diag' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    const id = url.searchParams.get('id') ?? '';
+    const meta = await catalog.detail(baseIdFor(id)).catch(() => null);
+    const target = meta ? streamTarget(id, meta) : null;
+    if (!target) return fail(res, 404, 'title not found');
+    const found = await resolveStream({
+      tmdbId: target.tmdbId,
+      imdbId: target.imdbId,
+      season: target.season,
+      episode: target.episode,
+      prefer: url.searchParams.get('src') ?? null,
+    }).catch((err) => ({ error: err.message }));
+    const language = found.url ? await manifestAudioLanguage(found.url, found.referer ?? null).catch(() => null) : null;
+    return json(res, 200, {
+      id,
+      target,
+      chrome: chromePath(),
+      url: found.url ?? null,
+      type: found.type ?? null,
+      error: found.error ?? null,
+      language,
+      tried: (found.tried ?? []).map((entry) => ({ source: entry.source ?? entry.page ?? '?', url: entry.url ?? null, error: entry.error ?? null })),
+    });
   }
 
   if (pathname === '/api/admin/ai' && method === 'POST') {
