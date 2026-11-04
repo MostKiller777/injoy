@@ -19,7 +19,7 @@ import { openHlsSession, readHlsSegment, switchHlsVariant, hlsPlaylist } from '.
 import { openRawSession, readRaw } from './lib/raw.js';
 import { resolveStream, chromePath } from './lib/resolver.js';
 import { manifestAudioLanguage } from './lib/tslang.js';
-import { record as recordVisit, report as analyticsReport, flush as flushAnalytics } from './lib/analytics.js';
+import { record as recordVisit, report as analyticsReport, flush as flushAnalytics, geoFor, clientIp } from './lib/analytics.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
 import { hlsSession, readLocalHlsSegment, localHlsPlaylist, readHlsManifest } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
@@ -743,6 +743,8 @@ async function handleApi(req, res, url) {
       prefer: url.searchParams.get('src') ?? null,
     }).catch((err) => ({ error: err.message }));
     const language = found.url ? await manifestAudioLanguage(found.url, found.referer ?? null).catch(() => null) : null;
+    const ip = url.searchParams.get('ip');
+    const geo = ip ? await geoFor(ip) : null;
     return json(res, 200, {
       id,
       target,
@@ -751,6 +753,8 @@ async function handleApi(req, res, url) {
       type: found.type ?? null,
       error: found.error ?? null,
       language,
+      geo,
+      clientIp: clientIp(req),
       tried: (found.tried ?? []).map((entry) => ({ source: entry.source ?? entry.page ?? '?', url: entry.url ?? null, error: entry.error ?? null })),
     });
   }

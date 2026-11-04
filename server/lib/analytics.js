@@ -94,7 +94,7 @@ function prune() {
   for (let at = 0; at < excess; at += 1) delete state.days[keys[at]];
 }
 
-function clientIp(req) {
+export function clientIp(req) {
   const header = [
     req.headers['cf-connecting-ip'],
     req.headers['true-client-ip'],
@@ -143,7 +143,7 @@ function referrerHost(value) {
 }
 
 /** Country for an address, cached. Returns a promise that never rejects. */
-async function geoFor(ip) {
+export async function geoFor(ip) {
   if (!ip || LOCAL.test(ip)) return { country: 'Local', code: 'LO', city: null };
   const cached = geoCache.get(ip);
   if (cached && Date.now() - cached.at < GEO_TTL_MS) return cached.value;
@@ -305,7 +305,10 @@ export async function report(days = 1) {
     });
   }
 
-  const share = (count) => (range.visitors ? Math.round((count / range.visitors) * 1000) / 10 : 0);
+  const share = (count) => {
+    const total = Object.values(range.countries ?? {}).reduce((sum, value) => sum + value, 0);
+    return total ? Math.round((count / total) * 1000) / 10 : 0;
+  };
 
   return {
     generatedAt: new Date().toISOString(),
