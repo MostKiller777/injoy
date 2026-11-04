@@ -19,6 +19,7 @@ import { openHlsSession, readHlsSegment, switchHlsVariant, hlsPlaylist } from '.
 import { openRawSession, readRaw } from './lib/raw.js';
 import { resolveStream, chromePath } from './lib/resolver.js';
 import { manifestAudioLanguage } from './lib/tslang.js';
+import { record as recordVisit, report as analyticsReport, flush as flushAnalytics } from './lib/analytics.js';
 import { dashSession, readDashSegment } from './lib/dashstore.js';
 import { hlsSession, readLocalHlsSegment, localHlsPlaylist, readHlsManifest } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
@@ -223,9 +224,22 @@ function baseIdFor(id) {
   return parts[0] === 'tv' ? parts.slice(0, 2).join(':') : String(id);
 }
 
+// Play counts are keyed by the title's name, not its id, so the dashboard reads
+// like a schedule instead of a list of tmdb numbers.
+const titleNames = new Map();
+
+async function notePlay(req, id) {
+  let name = titleNames.get(id);
+  if (!name) {
+    const meta = await catalog.detail(baseIdFor(id)).catch(() => null);
+    name = meta?.title ?? id;
+    titleNames.set(id, name);
+  }
+  await recordVisit(req, { kind: 'play', path: '/play', title: name }).catch(() => {});
+}
+
 /**
  * Where a title's captions live.
- *
  * Series carry an IMDb id in the frozen map and their episode coordinates.
  * Films carry neither, so the subtitles module matches one from the title and
  * year and keeps the answer.
@@ -703,6 +717,14 @@ async function handleApi(req, res, url) {
   if (pathname === '/api/admin/ai' && method === 'GET') {
     if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
     return json(res, 200, aiStatus());
+  }
+
+  // visit analytics for the admin dashboard
+  if (pathname === '/api/admin/analytics' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin session required');
+    const data = await analyticsReport(Number(url.searchParams.get('days') ?? 1));
+    await flushAnalytics();
+    return json(res, 200, data);
   }
 
   // Why a title is not direct, from the inside: which providers answered, what
@@ -1368,6 +1390,15 @@ async function handleApi(req, res, url) {
     return json(res, 200, { progress: store.allProgress() });
   }
 
+  // SPA route beacon: the document loads once, every view after that is a hash
+  // change the server would otherwise never see.
+  if (pathname === '/api/track' && method === 'POST') {
+    const body = await readBody(req, 4_096);
+    const path = typeof body.path === 'string' ? body.path.slice(0, 120) : '/';
+    void recordVisit(req, { kind: 'route', path }).catch(() => {});
+    return json(res, 200, { ok: true });
+  }
+
   const progressMatch = /^\/api\/progress\/(.+)$/.exec(pathname);
   if (progressMatch && method === 'POST') {
     const id = decodeURIComponent(progressMatch[1]);
@@ -1404,6 +1435,12 @@ const server = createServer(async (req, res) => {
       if (process.env.LOG_API !== '0') {
         console.log(`${req.method} ${url.pathname}${url.search} → ${res.statusCode} (${Date.now() - started}ms)`);
       }
+      // A play is the one API call worth counting: it says which title was
+      // actually started, not just which poster was looked at.
+      if (url.pathname.startsWith('/api/play/') && res.statusCode === 200) {
+        const playId = decodeURIComponent(url.pathname.slice('/api/play/'.length));
+        void notePlay(req, playId);
+      }
       return;
     }
 
@@ -1411,7 +1448,13 @@ const server = createServer(async (req, res) => {
       return fail(res, 405, 'method not allowed');
     }
 
-    return serveAsset(req, res, decodeURIComponent(url.pathname));
+    const served = await serveAsset(req, res, decodeURIComponent(url.pathname));
+    // The app is a single page: the document load is the visit, and every
+    // later route arrives through the beacon below.
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      void recordVisit(req, { kind: 'view', path: '/' }).catch(() => {});
+    }
+    return served;
   } catch (err) {
     console.error(`[server] ${req.method} ${url.pathname}: ${err.stack ?? err.message}`);
     if (!res.headersSent) fail(res, err.status ?? 500, err.message ?? 'internal error');
@@ -1435,6 +1478,7 @@ async function shutdown(signal) {
   console.log(`\n[server] ${signal} — flushing library`);
   try {
     await store.flush();
+    await flushAnalytics();
   } finally {
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 1500).unref();

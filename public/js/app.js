@@ -14,6 +14,8 @@ import {
   codeApply,
   codeChat,
   codeReject,
+  getAnalytics,
+  trackVisit,
   getBrowse,
   getDetail,
   getGenres,
@@ -164,6 +166,13 @@ function restoreBase() {
 
 function route() {
   const hash = location.hash || '#/';
+  // The document loads once; every navigation after that is a hash change the
+  // server never sees unless the page says so. Sent for browsing paths only —
+  // an admin screen is not a visit.
+  if (!hash.startsWith('#/admin')) {
+    const path = hash.split('?')[0].slice(0, 120);
+    trackVisit(path).catch(() => {});
+  }
 
   if (hash.startsWith('#/movie/')) {
     const id = decodeURIComponent(hash.slice('#/movie/'.length));
@@ -743,7 +752,107 @@ async function renderAdminPanel(signal, session = {}) {
 
   const codeLink = el('a', { class: 'btn btn-ghost btn-mini', href: '#/admin/code', text: 'Code agent' });
 
-  /* --------------------------- site doctor agent --------------------------- */
+  /* ------------------------------ analytics ------------------------------- */
+
+  const trafficRanges = [
+    { days: 1, label: 'Today' },
+    { days: 7, label: '7 days' },
+    { days: 30, label: '30 days' },
+  ];
+  let trafficDays = 1;
+
+  const trafficKpis = el('div', { class: 'traffic-kpis' });
+  const trafficChart = el('div', { class: 'traffic-chart' });
+  const trafficCountries = el('div', { class: 'traffic-list' });
+  const trafficTitles = el('div', { class: 'traffic-list' });
+  const trafficSources = el('div', { class: 'traffic-list' });
+  const trafficNote = el('p', { class: 'admin-foot', text: 'Counted on the server: one row per visit, address salted and hashed, never stored.' });
+  const rangeButtons = trafficRanges.map((entry) => {
+    const button = el('button', {
+      class: `traffic-range${entry.days === 1 ? ' is-on' : ''}`,
+      type: 'button',
+      on: {
+        click: () => {
+          trafficDays = entry.days;
+          for (const node of rangeButtons) node.classList.toggle('is-on', node === button);
+          void loadTraffic();
+        },
+      },
+    }, entry.label);
+    return button;
+  });
+
+  const barList = (target, rows, { suffix = '', empty = 'Nothing yet.' } = {}) => {
+    target.replaceChildren();
+    if (!rows.length) {
+      target.append(el('p', { class: 'traffic-empty', text: empty }));
+      return;
+    }
+    const peak = Math.max(...rows.map((row) => row.count), 1);
+    for (const row of rows) {
+      target.append(el('div', { class: 'traffic-row' },
+        el('span', { class: 'traffic-row-name', text: row.name, title: row.name }),
+        el('span', { class: 'traffic-row-bar' },
+          el('span', { class: 'traffic-row-fill', style: `width:${Math.max(4, Math.round((row.count / peak) * 100))}%` }),
+        ),
+        el('span', { class: 'traffic-row-value', text: `${row.count}${suffix}` }),
+      ));
+    }
+  };
+
+  const kpi = (label, value, sub) => el('div', { class: 'traffic-kpi' },
+    el('span', { class: 'traffic-kpi-label', text: label }),
+    el('strong', { class: 'traffic-kpi-value', text: String(value) }),
+    sub ? el('span', { class: 'traffic-kpi-sub', text: sub }) : null,
+  );
+
+  const paintTraffic = (data) => {
+    const { today, range } = data;
+    const perVisitor = range.visitors ? (range.plays / range.visitors).toFixed(1) : '0.0';
+
+    trafficKpis.replaceChildren(
+      kpi('Visitors today', today.visitors, today.date),
+      kpi('Page views today', today.views, 'today'),
+      kpi('Plays today', today.plays, 'titles started'),
+      kpi(`Visitors · ${data.span === 1 ? 'today' : `${data.span} days`}`, range.visitors, `${perVisitor} plays each`),
+    );
+
+    const series = data.timeline.slice(-14);
+    const peak = Math.max(...series.map((day) => day.visitors), 1);
+    trafficChart.replaceChildren(...series.map((day) => el('div', { class: 'traffic-bar', title: `${day.date} · ${day.visitors} visitors · ${day.views} views` },
+      el('span', {
+        class: 'traffic-bar-fill',
+        style: `height:${Math.max(3, Math.round((day.visitors / peak) * 100))}%`,
+      }),
+      el('span', { class: 'traffic-bar-label', text: day.date.slice(5) }),
+    )));
+
+    barList(trafficCountries, range.countries.map((row) => ({
+      name: `${row.name} · ${row.share}%`,
+      count: row.count,
+    })), { empty: 'No countries recorded yet.' });
+
+    barList(trafficTitles, range.titles.map((row) => ({ name: row.name, count: row.count })), { empty: 'No plays yet.' });
+
+    const sources = [
+      ...range.referrers.map((row) => ({ name: row.name, count: row.count })),
+      ...range.devices.map((row) => ({ name: `${row.name} devices`, count: row.count })),
+    ];
+    barList(trafficSources, sources, { empty: 'No referrers yet.' });
+  };
+
+  const loadTraffic = async () => {
+    try {
+      const data = await getAnalytics(trafficDays, signal);
+      if (signal?.aborted) return;
+      paintTraffic(data);
+    } catch (err) {
+      if (err.status === 401) { renderAdmin(); return; }
+      trafficKpis.replaceChildren(el('p', { class: 'traffic-empty', text: `Could not load traffic: ${err.message}` }));
+    }
+  };
+
+  /* ------------------------------- doctor -------------------------------- */
 
   let doctorReport = null;
   const doctorSummary = el('p', { class: 'doctor-summary', text: 'Not checked yet.' });
@@ -1068,6 +1177,23 @@ async function renderAdminPanel(signal, session = {}) {
         el('p', { class: 'admin-foot', text: 'Entries are stored in data/custom-films.json. Removing one here removes it from the catalogue.' }),
       ),
     ),
+    el('section', { class: 'admin-card admin-traffic' },
+      el('div', { class: 'admin-doctor-head' },
+        el('div', {},
+          el('h2', { class: 'admin-section-title', text: 'Traffic' }),
+          el('p', { class: 'admin-doctor-sub', text: 'Who came today, where from, and what they watched.' }),
+        ),
+        el('div', { class: 'traffic-ranges' }, ...rangeButtons),
+      ),
+      trafficKpis,
+      trafficChart,
+      el('div', { class: 'traffic-columns' },
+        el('div', {}, el('h3', { class: 'admin-subtitle', text: 'Countries' }), trafficCountries),
+        el('div', {}, el('h3', { class: 'admin-subtitle', text: 'Most played' }), trafficTitles),
+        el('div', {}, el('h3', { class: 'admin-subtitle', text: 'Sources · devices' }), trafficSources),
+      ),
+      trafficNote,
+    ),
     el('section', { class: 'admin-card admin-doctor' },
       el('div', { class: 'admin-doctor-head' },
         el('div', {},
@@ -1083,6 +1209,7 @@ async function renderAdminPanel(signal, session = {}) {
 
   chatInput.focus();
   void loadCustom();
+  void loadTraffic();
   void runDoctor();
 }
 

@@ -147,6 +147,10 @@ export const getPlay = (id, signal, src = null) => api(
 );
 export const getRandom = () => api('/api/random');
 
+// Visit analytics: the beacon is fire-and-forget, the report is admin-only.
+export const trackVisit = (path) => api('/api/track', { method: 'POST', body: { path }, retries: 0, timeout: 8_000 });
+export const getAnalytics = (days = 1, signal) => api(`/api/admin/analytics?days=${encodeURIComponent(days)}`, { signal, cacheable: false });
+
 // Captions for one title: every language the index has, as WebVTT endpoints.
 export const getSubtitles = (id, duration = null, fps = null) => {
   const params = new URLSearchParams();
