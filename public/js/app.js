@@ -38,6 +38,10 @@ import * as ui from './ui.js';
 import { el } from './ui.js';
 
 const ADMIN_CHAT_KEY = 'injoy.adminChat.v1';
+// Additions made in the panel, kept in this browser as a second copy. A host
+// with no disk forgets its data directory on every deploy; the browser does
+// not, so the admin's own additions walk back in on the next panel load.
+const ADMIN_ADDED_KEY = 'injoy.adminAdded.v1';
 const CODE_CHAT_KEY = 'injoy.codeChat.v1';
 
 function readStored(key, fallback) {
@@ -623,6 +627,16 @@ async function renderAdminPanel(signal, session = {}) {
       }
       if (data.item) button.textContent = data.already ? 'In catalogue' : 'Added';
       else button.textContent = 'Add';
+      // Remember the addition in this browser as well: the server may be
+      // redeployed empty, and this copy is what restores it.
+      if (!data.already && item.imdbId) {
+        const kept = readStored(ADMIN_ADDED_KEY, []);
+        const list = Array.isArray(kept) ? kept : [];
+        if (!list.some((entry) => entry.imdbId === item.imdbId)) {
+          list.push({ imdbId: item.imdbId, title: item.title });
+          writeStored(ADMIN_ADDED_KEY, list.slice(-300));
+        }
+      }
     } catch (err) {
       if (err.status === 401) {
         renderAdmin();
@@ -692,8 +706,35 @@ async function renderAdminPanel(signal, session = {}) {
       const persist = data.persist ?? null;
       persistNote.textContent = persist?.enabled
         ? `Saved to ${persist.repo} · ${persist.file}${persist.lastPush ? ` · last save ${new Date(persist.lastPush).toLocaleTimeString()}` : ''}`
-        : 'Additions live in data/custom-films.json on this server only. Set GITHUB_TOKEN and GITHUB_REPO to keep them across deploys.';
+        : `Read from ${persist?.repo ?? 'the repository'} on every boot, but new additions need GITHUB_TOKEN in the host's environment to be written back.`;
       persistNote.classList.toggle('is-off', !persist?.enabled);
+
+      // Second copy: anything this browser added that the server no longer has
+      // (a redeploy wiped the data directory) is put back before the list draws.
+      const kept = readStored(ADMIN_ADDED_KEY, []);
+      const known = new Set((data.items ?? []).map((entry) => entry.title));
+      const missing = (Array.isArray(kept) ? kept : []).filter((entry) => entry?.imdbId && !known.has(entry.title));
+      if (missing.length) {
+        for (const entry of missing) {
+          await adminAdd(entry.imdbId).catch(() => null);
+        }
+        invalidateCatalog();
+        const fresh = await adminCustom().catch(() => data);
+        if (signal?.aborted) return;
+        return paintCustom(fresh);
+      }
+      return paintCustom(data);
+    } catch (err) {
+      if (err.status === 401) {
+        renderAdmin();
+        return;
+      }
+      customList.replaceChildren(el('p', { class: 'admin-empty', text: `Could not load the custom shelf: ${err.message}` }));
+    }
+  }
+
+  function paintCustom(data) {
+    {
       const items = data.items ?? [];
       customList.replaceChildren();
       if (!items.length) {
@@ -731,13 +772,6 @@ async function renderAdminPanel(signal, session = {}) {
           ),
         ));
       }
-    } catch (err) {
-      if (signal?.aborted) return;
-      if (err.status === 401) {
-        renderAdmin();
-        return;
-      }
-      customList.replaceChildren(el('p', { class: 'admin-empty', text: `Could not load custom films: ${err.message}` }));
     }
   }
 

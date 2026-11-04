@@ -33,7 +33,7 @@ export const persistEnabled = () => Boolean(TOKEN && REPO);
 export function persistStatus() {
   return {
     enabled: persistEnabled(),
-    repo: persistEnabled() ? REPO : null,
+    repo: REPO || null,
     branch: BRANCH,
     file: FILE_PATH,
     lastPush: state.lastPush,
@@ -64,7 +64,9 @@ async function remoteSha() {
  * has one. Called once at boot, before the catalogue is built.
  */
 export async function pullCustomFilms() {
-  if (!persistEnabled()) return { skipped: true };
+  // Reading the raw file needs no credentials: a public repository answers
+  // anyone. Only writing does, so the pull runs on every boot.
+  if (!REPO) return { skipped: true, reason: 'no GITHUB_REPO' };
   try {
     const res = await fetch(
       `https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILE_PATH}?t=${Date.now()}`,
