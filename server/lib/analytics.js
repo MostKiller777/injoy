@@ -142,35 +142,66 @@ function referrerHost(value) {
   }
 }
 
+// Every provider below is free and keyless. A hosted network can refuse one or
+// two of them (ip-api answers only over plain HTTP, ipapi.co rate-limits a
+// datacenter immediately), so the lookup walks the list instead of trusting a
+// single host.
+const GEO_PROVIDERS = [
+  async (ip, signal) => {
+    const res = await fetch(`https://api.country.is/${encodeURIComponent(ip)}`, { signal });
+    if (!res.ok) throw new Error(`country.is ${res.status}`);
+    const body = await res.json();
+    if (!body?.country) throw new Error('country.is empty');
+    return { country: body.country, code: String(body.country).toUpperCase(), city: null };
+  },
+  async (ip, signal) => {
+    const res = await fetch(`https://freeipapi.com/api/json/${encodeURIComponent(ip)}`, { signal });
+    if (!res.ok) throw new Error(`freeipapi ${res.status}`);
+    const body = await res.json();
+    if (!body?.countryCode) throw new Error('freeipapi empty');
+    return { country: body.countryName ?? body.countryCode, code: String(body.countryCode).toUpperCase(), city: body.cityName ?? null };
+  },
+  async (ip, signal) => {
+    const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, { signal });
+    if (!res.ok) throw new Error(`ipwho ${res.status}`);
+    const body = await res.json();
+    if (!body?.success) throw new Error('ipwho refused');
+    return { country: body.country ?? 'Unknown', code: String(body.country_code ?? '--').toUpperCase(), city: body.city ?? null };
+  },
+  async (ip, signal) => {
+    const res = await fetch(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { signal, headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error(`ipinfo ${res.status}`);
+    const body = await res.json();
+    if (!body?.country) throw new Error('ipinfo empty');
+    return { country: body.country, code: String(body.country).toUpperCase(), city: body.city ?? null };
+  },
+  async (ip, signal) => {
+    const res = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, { signal, headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error(`ipapi ${res.status}`);
+    const body = await res.json();
+    if (body?.error) throw new Error('ipapi refused');
+    return { country: body.country_name ?? 'Unknown', code: String(body.country_code ?? '--').toUpperCase(), city: body.city ?? null };
+  },
+];
+
+function signalFor() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GEO_TIMEOUT_MS);
+  timer.unref?.();
+  controller.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+  return controller.signal;
+}
+
 /** Country for an address, cached. Returns a promise that never rejects. */
 export async function geoFor(ip) {
   if (!ip || LOCAL.test(ip)) return { country: 'Local', code: 'LO', city: null };
   const cached = geoCache.get(ip);
   if (cached && Date.now() - cached.at < GEO_TTL_MS) return cached.value;
 
-  // Two providers, both free and keyless. A datacenter address is sometimes
-  // refused by one and answered by the other, so a miss on the first is not a
-  // miss overall.
-  const providers = [
-    async () => {
-      const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, { signal: signalFor() });
-      if (!res.ok) throw new Error(`ipwho ${res.status}`);
-      const body = await res.json();
-      if (!body?.success) throw new Error('ipwho refused');
-      return { country: body.country ?? 'Unknown', code: String(body.country_code ?? '--').toUpperCase(), city: body.city ?? null };
-    },
-    async () => {
-      const res = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`, { signal: signalFor(), headers: { accept: 'application/json' } });
-      if (!res.ok) throw new Error(`ipapi ${res.status}`);
-      const body = await res.json();
-      if (body?.error) throw new Error('ipapi refused');
-      return { country: body.country_name ?? 'Unknown', code: String(body.country_code ?? '--').toUpperCase(), city: body.city ?? null };
-    },
-  ];
-
-  for (const provider of providers) {
+  for (const provider of GEO_PROVIDERS) {
     try {
-      const value = await provider();
+      const raw = await provider(ip, signalFor());
+      const value = { ...raw, country: countryName(raw.code) ?? raw.country };
       if (geoCache.size > GEO_CACHE_MAX) geoCache.clear();
       geoCache.set(ip, { at: Date.now(), value });
       return value;
@@ -186,12 +217,29 @@ export async function geoFor(ip) {
   return value;
 }
 
-function signalFor() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), GEO_TIMEOUT_MS);
-  timer.unref?.();
-  controller.signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
-  return controller.signal;
+/** Country name from an ISO code, so every provider agrees on the spelling. */
+function countryName(code) {
+  if (!code || !/^[A-Z]{2}$/.test(code)) return null;
+  try {
+    return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Ask every provider and report each verdict. Used by the admin diag route. */
+export async function geoDebug(ip) {
+  const out = [];
+  for (let at = 0; at < GEO_PROVIDERS.length; at += 1) {
+    const started = Date.now();
+    try {
+      const value = await GEO_PROVIDERS[at](ip, signalFor());
+      out.push({ provider: at, ok: true, ms: Date.now() - started, ...value });
+    } catch (err) {
+      out.push({ provider: at, ok: false, ms: Date.now() - started, error: String(err.message ?? err).slice(0, 90) });
+    }
+  }
+  return out;
 }
 
 /**
