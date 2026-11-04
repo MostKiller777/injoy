@@ -1270,6 +1270,7 @@ export async function openPlayer(item) {
     if (closed) return;
     closed = true;
     stopUpgradeWatch();
+    stopEmbedWatchdog();
     if (video) saveProgress(item.id, video.currentTime, Number.isFinite(video.duration) ? video.duration : current?.duration);
     clearInterval(saveTimer);
     clearTimeout(hideTimer);
@@ -1650,6 +1651,11 @@ export async function openPlayer(item) {
    * arrive without a reload.
    */
   let upgradeTimer = null;
+  let embedWatchdog = null;
+  const stopEmbedWatchdog = () => {
+    if (embedWatchdog) clearTimeout(embedWatchdog);
+    embedWatchdog = null;
+  };
   const stopUpgradeWatch = () => {
     if (upgradeTimer) clearInterval(upgradeTimer);
     upgradeTimer = null;
@@ -1691,6 +1697,9 @@ export async function openPlayer(item) {
       sources = embeds;
       toast(embeds.length > 1 ? 'Switched to a backup player — more sources in the bar' : 'Switched to the backup player', 'warn');
       mountSource(0);
+      // The fallback is not the end of the hunt: the server keeps sniffing, and
+      // the moment it has a manifest the player swaps back to the native stream.
+      watchForDirect(item.playId ?? item.id);
       return;
     }
     showStatus('Stream unavailable', message, false);
@@ -1699,6 +1708,7 @@ export async function openPlayer(item) {
   const mountSource = (index) => {
     const source = sources[index];
     if (!source) return;
+    stopEmbedWatchdog();
     detachFeeder(detachStream);
     detachStream = null;
     current = source;
@@ -1860,7 +1870,17 @@ export async function openPlayer(item) {
     stage.append(iframe);
     stage.classList.remove('is-idle');
     buildEmbedControls();
-    on(iframe, 'load', () => flashNote('Backup player loaded.', 2600));
+    on(iframe, 'load', () => {
+      stopEmbedWatchdog();
+      flashNote('Backup player loaded.', 2600);
+    });
+    // A provider that never paints leaves a black box with no explanation. Try
+    // the next source on its own rather than waiting for a click.
+    stopEmbedWatchdog();
+    embedWatchdog = setTimeout(() => {
+      if (closed || current?.kind !== 'embed') return;
+      if (sources.filter((entry) => entry.kind === 'embed').length > 1) nextEmbed();
+    }, 12_000);
   };
 
   /* ------------------------------ boot -------------------------------- */
