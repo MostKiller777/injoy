@@ -1212,6 +1212,13 @@ async function renderAdminPanel(signal, session = {}) {
   chatInput.focus();
   void loadCustom();
   void loadTraffic();
+  // The panel is usually left open on a second screen: refresh the counters so
+  // the numbers are current without a reload.
+  const trafficTimer = setInterval(() => {
+    if (signal?.aborted) return;
+    void loadTraffic();
+  }, 45_000);
+  signal?.addEventListener('abort', () => clearInterval(trafficTimer), { once: true });
   void runDoctor();
 }
 
