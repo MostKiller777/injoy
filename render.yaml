@@ -32,6 +32,16 @@ services:
       # Optional. Leave blank for the keyless curated catalogue.
       - key: TMDB_API_KEY
         sync: false
+      # Optional but recommended: a fine-grained token with Contents read/write
+      # on this repository, so films added in the admin panel are committed and
+      # survive the next deploy. Without it the additions live and die with the
+      # container.
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        value: MostKiller777/injoy
+      - key: GITHUB_BRANCH
+        value: main
     # disk:
     #   name: injoy-data
     #   mountPath: /data

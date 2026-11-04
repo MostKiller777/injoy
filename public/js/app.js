@@ -683,10 +683,17 @@ async function renderAdminPanel(signal, session = {}) {
     }
   };
 
+  const persistNote = el('p', { class: 'admin-foot persist-note' });
+
   async function loadCustom() {
     try {
       const data = await adminCustom();
       if (signal?.aborted) return;
+      const persist = data.persist ?? null;
+      persistNote.textContent = persist?.enabled
+        ? `Saved to ${persist.repo} · ${persist.file}${persist.lastPush ? ` · last save ${new Date(persist.lastPush).toLocaleTimeString()}` : ''}`
+        : 'Additions live in data/custom-films.json on this server only. Set GITHUB_TOKEN and GITHUB_REPO to keep them across deploys.';
+      persistNote.classList.toggle('is-off', !persist?.enabled);
       const items = data.items ?? [];
       customList.replaceChildren();
       if (!items.length) {
@@ -1176,6 +1183,7 @@ async function renderAdminPanel(signal, session = {}) {
         results,
         el('h3', { class: 'admin-subtitle', text: 'Custom films' }),
         customList,
+        persistNote,
         el('p', { class: 'admin-foot', text: 'Entries are stored in data/custom-films.json. Removing one here removes it from the catalogue.' }),
       ),
     ),

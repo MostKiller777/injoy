@@ -24,7 +24,8 @@ import { dashSession, readDashSegment } from './lib/dashstore.js';
 import { hlsSession, readLocalHlsSegment, localHlsPlaylist, readHlsManifest } from './lib/hlsstore.js';
 import { seriesStreamTarget } from './lib/series.js';
 import { subtitleTracks, subtitleVtt } from './lib/subtitles.js';
-import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFilm } from './lib/curated.js';
+import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFilm, reloadCustomFilms } from './lib/curated.js';
+import { pullCustomFilms, pushCustomFilms, persistStatus } from './lib/github.js';
 import { filmFromImdb, searchMovies } from './lib/cinemeta.js';
 import { repair, runDiagnostics } from './lib/doctor.js';
 import { agentChat } from './lib/agent-chat.js';
@@ -877,6 +878,8 @@ async function handleApi(req, res, url) {
       }
       const item = addCustomFilm(film);
       cache.clear();
+      // Commit the change so the entry survives the next deploy.
+      void pushCustomFilms(`injoy: add ${film.title}`);
       return json(res, 200, { ok: true, added: true, item });
     } catch (err) {
       return fail(res, err.status ?? 502, err.message);
@@ -889,6 +892,7 @@ async function handleApi(req, res, url) {
       items: customFilmList().map(({ id, title, year, tmdbId, poster, rating }) => ({
         id, title, year, tmdbId, poster, rating,
       })),
+      persist: persistStatus(),
     });
   }
 
@@ -899,6 +903,7 @@ async function handleApi(req, res, url) {
       const removed = removeCustomFilm(body.tmdbId);
       if (!removed) return fail(res, 404, 'not a custom film');
       cache.clear();
+      void pushCustomFilms('injoy: remove a film');
       return json(res, 200, { ok: true, removed: true });
     } catch (err) {
       return fail(res, err.status ?? 500, err.message);
@@ -1425,6 +1430,12 @@ async function handleApi(req, res, url) {
 }
 
 /* ------------------------------- server -------------------------------- */
+
+// The hosted image has no disk, so the catalogue additions the repository holds
+// are pulled in before the first request. A failed pull leaves the built-ins
+// intact — an empty shelf is worse than a stale one.
+await pullCustomFilms().catch(() => {});
+reloadCustomFilms();
 
 const server = createServer(async (req, res) => {
   const started = Date.now();

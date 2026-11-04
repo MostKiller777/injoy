@@ -4,3 +4,7 @@ data/
 *.log
 .DS_Store
 publish/bin/
+
+# Exception: the admin panel's additions are the catalogue, not runtime state.
+# They are committed so a redeploy on a diskless host brings them back.
+!data/custom-films.json

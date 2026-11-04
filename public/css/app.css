@@ -2506,3 +2506,6 @@ kbd {
   .traffic-chart { height: 74px; }
   .traffic-kpi-value { font-size: 22px; }
 }
+
+.persist-note { margin-top: 10px; }
+.persist-note.is-off { color: #ffb27a; }
