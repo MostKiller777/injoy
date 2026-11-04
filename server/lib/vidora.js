@@ -48,6 +48,8 @@ async function refreshPlayerKey() {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+import { manifestAudioLanguage } from './tslang.js';
+
 async function ask(path, source, key) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ATTEMPT_TIMEOUT_MS);
@@ -96,6 +98,25 @@ async function ask(path, source, key) {
  * source key declined. Callers treat a miss as "nothing to see here" and keep
  * walking their own provider list.
  */
+/**
+ * Pick the candidate whose default audio is English.
+ *
+ * Each source key is a different encode of the same film, and plenty of them are
+ * dual-audio releases whose first PID is a dub. Silence is worse than a slower
+ * start, so each candidate's first segment is read and the PMT decides; an
+ * unreadable candidate counts as acceptable rather than being skipped.
+ */
+async function preferEnglish(hits, prefer) {
+  // An explicit key from the viewer is a decision, not a suggestion.
+  if (prefer) return hits[0];
+
+  for (const hit of hits) {
+    const lang = await manifestAudioLanguage(hit.url, hit.referer).catch(() => null);
+    if (!lang || lang === 'eng' || lang === 'en' || lang === 'und') return hit;
+  }
+  return hits[0];
+}
+
 export async function vidoraStream({ tmdbId, season = null, episode = null, prefer = null } = {}) {
   const id = Number(tmdbId);
   if (!Number.isFinite(id) || id <= 0) return { error: 'no tmdb id' };
@@ -121,12 +142,15 @@ export async function vidoraStream({ tmdbId, season = null, episode = null, pref
 
   const tried = [];
   let staleKey = false;
+  const hits = [];
   for (let at = 0; at < order.length; at += 1) {
     const hit = attempts[at];
     if (hit?.retryKey) staleKey = true;
     tried.push({ source: order[at], url: hit?.url ?? null });
-    if (hit?.url) return { ...hit, tried };
+    if (hit?.url) hits.push({ ...hit, source: order[at] });
   }
+
+  if (hits.length) return { ...(await preferEnglish(hits, prefer)), tried };
 
   // One rotation is enough: refresh once and repeat the whole set.
   if (staleKey) {
