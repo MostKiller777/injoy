@@ -26,6 +26,10 @@ import { seriesStreamTarget } from './lib/series.js';
 import { subtitleTracks, subtitleVtt } from './lib/subtitles.js';
 import { addCustomFilm, curatedDetail, customFilmList, isCurated, removeCustomFilm, reloadCustomFilms } from './lib/curated.js';
 import { pullCustomFilms, pushCustomFilms, persistStatus } from './lib/github.js';
+import {
+  stageUpload, stagedUploads, createJob, runJob, listJobs, getJob,
+  cancelJob, removeJob, tooling as ingestTooling, readJobFile, subscribe as subscribeIngest,
+} from './lib/ingest.js';
 import { filmFromImdb, searchMovies } from './lib/cinemeta.js';
 import { repair, runDiagnostics } from './lib/doctor.js';
 import { agentChat } from './lib/agent-chat.js';
@@ -896,8 +900,101 @@ async function handleApi(req, res, url) {
     });
   }
 
-  if (pathname === '/api/admin/remove' && method === 'POST') {
+  /* ------------------------------- ingest -------------------------------- */
+
+  if (pathname === '/api/admin/ingest' && method === 'GET') {
     if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    return json(res, 200, { jobs: listJobs(), staged: stagedUploads(), tooling: ingestTooling() });
+  }
+
+  // The file arrives as a raw stream: a multipart parser would have to buffer
+  // gigabytes of video in memory, and this host does not have it.
+  if (pathname === '/api/admin/ingest/upload' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    const name = url.searchParams.get('name') ?? 'upload.bin';
+    const length = Number(req.headers['content-length'] ?? 0) || null;
+    try {
+      const stagedEntry = await stageUpload(req, { name, length });
+      return json(res, 200, stagedEntry);
+    } catch (err) {
+      return fail(res, err.status ?? 500, err.message);
+    }
+  }
+
+  if (pathname === '/api/admin/ingest/start' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    try {
+      const body = await readBody(req);
+      const job = await createJob({ title: body.title ?? null, uploads: body.uploads ?? [] });
+      // The pipeline runs in the background: the reply is the job record, not
+      // the finished ladder.
+      void runJob(job.id).catch(() => {});
+      return json(res, 200, { job });
+    } catch (err) {
+      return fail(res, err.status ?? 500, err.message);
+    }
+  }
+
+  if (pathname === '/api/admin/ingest/cancel' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    const body = await readBody(req);
+    const ok = await cancelJob(body.id);
+    return ok ? json(res, 200, { ok: true }) : fail(res, 404, 'unknown job');
+  }
+
+  if (pathname === '/api/admin/ingest/remove' && method === 'POST') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    const body = await readBody(req);
+    const ok = await removeJob(body.id);
+    return ok ? json(res, 200, { ok: true }) : fail(res, 404, 'unknown job');
+  }
+
+  // Live job monitor: one SSE frame per change, plus a heartbeat so a proxy
+  // does not close an idle stream.
+  if (pathname === '/api/admin/ingest/events' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+      ...SECURITY_HEADERS,
+    });
+    const send = (jobs) => {
+      res.write(`data: ${JSON.stringify({ jobs, tooling: ingestTooling() })}\n\n`);
+    };
+    const unsubscribe = subscribeIngest(send);
+    const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
+    heartbeat.unref?.();
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+    return undefined;
+  }
+
+  if (pathname === '/api/admin/ingest/job' && method === 'GET') {
+    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
+    const job = getJob(url.searchParams.get('id') ?? '');
+    return job ? json(res, 200, job) : fail(res, 404, 'unknown job');
+  }
+
+  // Finished ladders are served straight out of the job directory.
+  const ingestFile = /^\/api\/ingest\/hls\/([^/]+)\/(.+)$/.exec(pathname);
+  if (ingestFile && (method === 'GET' || method === 'HEAD')) {
+    const out = await readJobFile(ingestFile[1], decodeURIComponent(ingestFile[2]));
+    if (out.error) return fail(res, out.status ?? 404, out.error);
+    res.writeHead(200, {
+      'content-type': out.type,
+      'content-length': out.size,
+      'cache-control': 'private, max-age=3600',
+      ...SECURITY_HEADERS,
+    });
+    if (method === 'HEAD') return res.end();
+    return out.stream.pipe(res);
+  }
+
+  if (pathname === '/api/admin/remove' && method === 'POST') {    if (!adminAllowed(req, url)) return fail(res, 401, 'admin key required');
     try {
       const body = await readBody(req);
       const removed = removeCustomFilm(body.tmdbId);

@@ -102,6 +102,15 @@ export const adminCustom = () =>
 export const adminRemove = (tmdbId) =>
   api('/api/admin/remove', { method: 'POST', body: { tmdbId }, timeout: 15_000, retries: 0 });
 
+// Ingest: uploads go through XHR for progress, the rest is plain JSON.
+export const ingestList = () => api('/api/admin/ingest', { timeout: 15_000, retries: 0 });
+export const ingestStart = (title, uploads) =>
+  api('/api/admin/ingest/start', { method: 'POST', body: { title, uploads }, timeout: 30_000, retries: 0 });
+export const ingestCancel = (id) =>
+  api('/api/admin/ingest/cancel', { method: 'POST', body: { id }, timeout: 15_000, retries: 0 });
+export const ingestRemove = (id) =>
+  api('/api/admin/ingest/remove', { method: 'POST', body: { id }, timeout: 15_000, retries: 0 });
+
 export const agentDiagnose = () =>
   api('/api/admin/agent', { timeout: 60_000, retries: 0 });
 

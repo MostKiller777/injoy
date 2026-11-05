@@ -16,6 +16,10 @@ import {
   codeReject,
   getAnalytics,
   trackVisit,
+  ingestCancel as ingestCancel$,
+  ingestList as ingestList$,
+  ingestRemove as ingestRemove$,
+  ingestStart as ingestStart$,
   getBrowse,
   getDetail,
   getGenres,
@@ -895,6 +899,261 @@ async function renderAdminPanel(signal, session = {}) {
     }
   };
 
+  /* -------------------------------- ingest -------------------------------- */
+
+  const ingestFiles = [];
+  const ingestList = el('div', { class: 'ingest-files' });
+  const ingestJobsEl = el('div', { class: 'ingest-jobs' });
+  const ingestTitle = el('input', {
+    class: 'ingest-title', type: 'text', placeholder: 'Title for this file',
+    'aria-label': 'Title for this file',
+  });
+  const ingestStatus = el('p', { class: 'ingest-status' });
+  const ingestTooling = el('p', { class: 'ingest-tooling' });
+  const ingestStart = el('button', { class: 'btn btn-primary btn-mini', type: 'button', disabled: '' }, 'Start ingest');
+  const ingestInput = el('input', { class: 'ingest-input', type: 'file', multiple: '', hidden: '' });
+
+  const ingestDrop = el('div', {
+    class: 'ingest-drop',
+    on: {
+      click: () => ingestInput.click(),
+      dragover: (event) => { event.preventDefault(); ingestDrop.classList.add('is-over'); },
+      dragleave: () => ingestDrop.classList.remove('is-over'),
+      drop: (event) => {
+        event.preventDefault();
+        ingestDrop.classList.remove('is-over');
+        addIngestFiles([...(event.dataTransfer?.files ?? [])]);
+      },
+    },
+  },
+    el('strong', { text: 'Drop a video here' }),
+    el('span', { text: 'MP4, MKV, MOV, TS — plus optional .srt or .vtt sidecars. Nothing is published until it passes QC.' }),
+  );
+
+  const addIngestFiles = (files) => {
+    for (const file of files) {
+      if (ingestFiles.some((entry) => entry.name === file.name && entry.file.size === file.size)) continue;
+      ingestFiles.push({ file, name: file.name, size: file.size, progress: 0, state: 'pending' });
+    }
+    if (ingestFiles.length && !ingestTitle.value) {
+      const video = ingestFiles.find((entry) => /\.(mp4|mkv|mov|ts|m4v|webm)$/i.test(entry.name));
+      if (video) ingestTitle.value = video.name.replace(/\.[^.]+$/, '').replace(/[._-]+/g, ' ').trim();
+    }
+    paintIngestFiles();
+  };
+
+  const paintIngestFiles = () => {
+    ingestList.replaceChildren();
+    for (const entry of ingestFiles) {
+      const remove = el('button', {
+        class: 'btn btn-ghost btn-mini', type: 'button',
+        on: {
+          click: () => {
+            const at = ingestFiles.indexOf(entry);
+            if (at >= 0) ingestFiles.splice(at, 1);
+            paintIngestFiles();
+          },
+        },
+      }, 'Remove');
+      ingestList.append(el('div', { class: 'ingest-file' },
+        el('span', { class: 'ingest-file-name', text: entry.name, title: entry.name }),
+        el('span', { class: 'ingest-file-size', text: `${(entry.size / 1024 ** 2).toFixed(0)} MB` }),
+        entry.state === 'uploading'
+          ? el('span', { class: 'ingest-file-bar' }, el('span', { style: `width:${entry.progress}%` }))
+          : el('span', { class: `ingest-file-state is-${entry.state}`, text: entry.state }),
+        remove,
+      ));
+    }
+    ingestStart.disabled = !ingestFiles.length || ingestFiles.some((entry) => entry.state === 'uploading');
+  };
+
+  /** Raw-body upload with real progress: fetch() cannot report it, XHR can. */
+  const uploadOne = (entry) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/admin/ingest/upload?name=${encodeURIComponent(entry.name)}`);
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      entry.progress = Math.round((event.loaded / event.total) * 100);
+      paintIngestFiles();
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); } catch { reject(new Error('bad reply')); }
+      } else {
+        reject(new Error(`upload failed (${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new Error('upload failed'));
+    entry.state = 'uploading';
+    entry.progress = 0;
+    paintIngestFiles();
+    xhr.send(entry.file);
+  });
+
+  const startIngest = async () => {
+    ingestStart.disabled = true;
+    ingestStart.textContent = 'Uploading…';
+    ingestStatus.textContent = 'Sending the files…';
+    try {
+      const uploads = [];
+      for (const entry of ingestFiles) {
+        const stagedEntry = await uploadOne(entry);
+        entry.state = 'done';
+        entry.progress = 100;
+        paintIngestFiles();
+        uploads.push(stagedEntry.id);
+      }
+      ingestStatus.textContent = 'Starting the pipeline…';
+      const started = await ingestStart$({ title: ingestTitle.value.trim() || null, uploads });
+      ingestStatus.textContent = `Job ${started.job.id.slice(0, 8)} queued.`;
+      ingestFiles.length = 0;
+      paintIngestFiles();
+      ingestTitle.value = '';
+      ui.toast('Ingest started');
+    } catch (err) {
+      ingestStatus.textContent = `Ingest failed: ${err.message}`;
+      ui.toast('Ingest failed', 'warn');
+    } finally {
+      ingestStart.textContent = 'Start ingest';
+      ingestStart.disabled = !ingestFiles.length;
+    }
+  };
+
+  const STATE_LABEL = {
+    queued: 'queued', probing: 'probing', validating: 'validating', planning: 'planning',
+    encoding: 'encoding', packaging: 'packaging', qc: 'QC', ready: 'ready',
+    failed: 'failed', cancelled: 'cancelled', 'tooling-missing': 'tooling missing',
+  };
+
+  const paintJobs = (jobs) => {
+    ingestJobsEl.replaceChildren();
+    if (!jobs.length) {
+      ingestJobsEl.append(el('p', { class: 'ingest-empty', text: 'No ingest jobs yet.' }));
+      return;
+    }
+    for (const job of jobs) {
+      const cancel = ['queued', 'probing', 'validating', 'planning', 'encoding', 'packaging', 'qc'].includes(job.state)
+        ? el('button', {
+            class: 'btn btn-ghost btn-mini', type: 'button',
+            on: { click: () => { void ingestCancel$(job.id).then(() => ui.toast('Cancelled')); } },
+          }, 'Cancel')
+        : null;
+      const remove = el('button', {
+        class: 'btn btn-ghost btn-mini', type: 'button',
+        on: {
+          click: async () => {
+            await ingestRemove$(job.id).catch(() => null);
+            ui.toast('Job removed');
+          },
+        },
+      }, 'Delete');
+
+      const ladder = job.ladder?.length
+        ? el('div', { class: 'ingest-ladder' }, ...job.ladder.map((rung) => el('span', {
+            class: `ingest-rung is-${rung.state}`,
+            title: `${rung.width}×${rung.height} · ${(rung.bitrate / 1_000_000).toFixed(1)} Mbps`,
+            text: `${rung.height}p`,
+          })))
+        : null;
+
+      const tracks = [
+        ...(job.audio ?? []).map((track) => `🔊 ${track.language ?? track.codec ?? 'audio'}${track.index === 0 ? ' · main' : ''}`),
+        ...(job.subtitles ?? []).map((sub) => `💬 ${sub.language ?? sub.title}`),
+      ];
+
+      const qc = job.qc
+        ? el('details', { class: `ingest-qc ${job.qc.passed ? 'is-pass' : 'is-fail'}` },
+            el('summary', { text: `QC · ${job.qc.summary}` }),
+            el('div', { class: 'ingest-qc-list' }, ...job.qc.checks.map((check) => el('div', {
+              class: `ingest-qc-row is-${check.ok ? 'ok' : 'bad'}`,
+            },
+              el('span', { class: 'ingest-qc-dot' }),
+              el('span', { class: 'ingest-qc-label', text: check.label }),
+              el('span', { class: 'ingest-qc-detail', text: check.detail }),
+            ))))
+        : null;
+
+      ingestJobsEl.append(el('article', { class: `ingest-job is-${job.state}` },
+        el('div', { class: 'ingest-job-head' },
+          el('strong', { text: job.title }),
+          el('span', { class: 'ingest-chip', text: STATE_LABEL[job.state] ?? job.state }),
+          el('span', { class: 'ingest-job-meta', text: `${job.progress}% · ${job.message}` }),
+        ),
+        el('div', { class: 'ingest-progress' }, el('span', { style: `width:${job.progress}%` })),
+        ladder,
+        tracks.length ? el('div', { class: 'ingest-tracks' }, ...tracks.map((text) => el('span', { class: 'ingest-track', text }))) : null,
+        job.error ? el('p', { class: 'ingest-error', text: job.error }) : null,
+        qc,
+        el('div', { class: 'ingest-job-actions' }, cancel, remove),
+      ));
+    }
+  };
+
+  const loadIngest = async () => {
+    try {
+      const data = await ingestList$();
+      if (signal?.aborted) return;
+      paintJobs(data.jobs ?? []);
+      const t = data.tooling ?? {};
+      ingestTooling.textContent = t.canEncode
+        ? `ffmpeg ready · ${t.ffmpeg}`
+        : 'ffmpeg/ffprobe not installed on this host: uploads are validated and planned, not encoded.';
+      ingestTooling.classList.toggle('is-warn', !t.canEncode);
+    } catch (err) {
+      if (err.status === 401) { renderAdmin(); return; }
+      ingestStatus.textContent = `Could not load jobs: ${err.message}`;
+    }
+  };
+
+  let ingestEvents = null;
+  const openIngestStream = () => {
+    if (typeof EventSource === 'undefined') return;
+    ingestEvents = new EventSource('/api/admin/ingest/events');
+    ingestEvents.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        paintJobs(data.jobs ?? []);
+        ingestTooling.textContent = data.tooling?.canEncode
+          ? `ffmpeg ready · ${data.tooling.ffmpeg}`
+          : 'ffmpeg/ffprobe not installed on this host: uploads are validated and planned, not encoded.';
+        ingestTooling.classList.toggle('is-warn', !data.tooling?.canEncode);
+      } catch { /* a broken frame is not worth a crash */ }
+    };
+    ingestEvents.onerror = () => {
+      ingestEvents?.close();
+      ingestEvents = null;
+    };
+  };
+
+  const ingestCard = el('section', { class: 'admin-card admin-ingest' },
+    el('div', { class: 'admin-doctor-head' },
+      el('div', {},
+        el('h2', { class: 'admin-section-title', text: 'Ingest' }),
+        el('p', { class: 'admin-doctor-sub', text: 'Drop a file: probe, validate, encode 240p→4K, mux audio and subtitles, then pass the QC gate before it can play.' }),
+      ),
+    ),
+    healthyIngestNote(),
+    ingestDrop,
+    ingestInput,
+    ingestTitle,
+    ingestList,
+    el('div', { class: 'ingest-actions' }, ingestStart),
+    ingestStatus,
+    ingestTooling,
+    el('h3', { class: 'admin-subtitle', text: 'Jobs' }),
+    ingestJobsEl,
+  );
+
+  function healthyIngestNote() {
+    return el('p', { class: 'ingest-note', text: 'Files stay in the job directory. Nothing is published until every rung has segments and the master playlist resolves.' });
+  }
+
+  ingestInput.addEventListener('change', () => {
+    addIngestFiles([...ingestInput.files]);
+    ingestInput.value = '';
+  });
+  ingestStart.addEventListener('click', () => { void startIngest(); });
+
   /* ------------------------------- doctor -------------------------------- */
 
   let doctorReport = null;
@@ -1221,6 +1480,7 @@ async function renderAdminPanel(signal, session = {}) {
         el('p', { class: 'admin-foot', text: 'Entries are stored in data/custom-films.json. Removing one here removes it from the catalogue.' }),
       ),
     ),
+    ingestCard,
     el('section', { class: 'admin-card admin-traffic' },
       el('div', { class: 'admin-doctor-head' },
         el('div', {},
@@ -1253,6 +1513,12 @@ async function renderAdminPanel(signal, session = {}) {
 
   chatInput.focus();
   void loadCustom();
+  void loadIngest();
+  openIngestStream();
+  signal?.addEventListener('abort', () => {
+    ingestEvents?.close();
+    ingestEvents = null;
+  }, { once: true });
   void loadTraffic();
   // The panel is usually left open on a second screen: refresh the counters so
   // the numbers are current without a reload.

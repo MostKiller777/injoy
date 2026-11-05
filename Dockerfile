@@ -17,6 +17,11 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
+# ffmpeg is the ingest pipeline's engine: ffprobe validates the upload and
+# ffmpeg builds the ladder. It is only needed when a file is ingested, so an
+# idle service pays nothing but the image size.
+RUN apk add --no-cache ffmpeg
+
 COPY package.json ./
 COPY server ./server
 COPY public ./public
