@@ -1,5 +1,5 @@
 /* injoy service worker — shell cache only. API traffic always goes to the network. */
-const VERSION = 'injoy-v75';
+const VERSION = 'injoy-v76';
 const SHELL = [
   '/',
   '/index.html',
@@ -29,6 +29,18 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+/**
+ * Refresh a cached entry without making the page wait for it.
+ */
+function revalidate(cache, request) {
+  return fetch(request)
+    .then((response) => {
+      if (response.ok) return cache.put(request, response.clone());
+      return null;
+    })
+    .catch(() => null);
+}
+
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
@@ -42,16 +54,25 @@ self.addEventListener('fetch', (event) => {
 
       // The shell is versioned: a release bumps VERSION, activation deletes the
       // previous cache, and these files cannot change underneath a live cache.
-      // Serving them from disk makes a repeat visit instant; HTML stays
-      // network-first so a deploy is still picked up immediately.
       const isStatic = /^\/(?:js|css)\//.test(url.pathname) || /\.(?:svg|webmanifest)$/.test(url.pathname);
       if (isStatic) {
         const hit = await cache.match(request, { ignoreSearch: true });
         if (hit) return hit;
       }
 
+      // The document paints from cache immediately and refreshes in the
+      // background. A hosted instance that went to sleep takes tens of seconds
+      // to answer the first request; waiting for that produced a blank tab with
+      // a spinner, which is exactly what this avoids.
+      if (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
+        const shell = await cache.match('/index.html');
+        if (shell) {
+          event.waitUntil(revalidate(cache, request));
+          return shell;
+        }
+      }
+
       try {
-        // Network-first for documents and anything not pinned above.
         const response = await fetch(request);
         if (response.ok) cache.put(request, response.clone());
         return response;

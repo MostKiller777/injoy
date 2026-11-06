@@ -19,7 +19,7 @@ export class ApiError extends Error {
 const memo = new Map();
 const MEMO_TTL = 60_000;
 
-export async function api(path, { method = 'GET', body, timeout = 15_000, retries = 1, signal, cacheable = false, headers = {} } = {}) {
+export async function api(path, { method = 'GET', body, timeout = 15_000, retries = 2, signal, cacheable = false, headers = {} } = {}) {
   if (cacheable && method === 'GET') {
     const hit = memo.get(path);
     if (hit && Date.now() - hit.at < MEMO_TTL) return hit.value;
@@ -66,19 +66,25 @@ export async function api(path, { method = 'GET', body, timeout = 15_000, retrie
       signal?.removeEventListener('abort', onAbort);
     }
 
-    if (attempt < retries) await new Promise((resolve) => setTimeout(resolve, 320));
+    // A hosted instance that has gone to sleep answers 502/503/504 until it is
+    // up. Those are waits, not failures: back off and ask again instead of
+    // painting an error the visitor cannot act on.
+    if (attempt < retries) {
+      const sleeping = !(lastError instanceof ApiError) || lastError.status === 502 || lastError.status === 503 || lastError.status === 504;
+      await new Promise((resolve) => setTimeout(resolve, sleeping ? 1500 * (attempt + 1) : 320));
+    }
   }
 
   throw lastError ?? new Error('network failure');
 }
 
-export const getHome = (signal) => api('/api/home', { signal, cacheable: true });
+export const getHome = (signal) => api('/api/home', { signal, cacheable: true, retries: 4 });
 export const getSearch = (q, page = 1, signal) =>
   api(`/api/search?q=${encodeURIComponent(q)}&page=${page}`, { signal, cacheable: true });
 export const getBrowse = ({ page = 1, genre = '', sort = 'popular' } = {}, signal) =>
-  api(`/api/browse?page=${page}&genre=${encodeURIComponent(genre)}&sort=${encodeURIComponent(sort)}`, { signal, cacheable: true });
+  api(`/api/browse?page=${page}&genre=${encodeURIComponent(genre)}&sort=${encodeURIComponent(sort)}`, { signal, cacheable: true, retries: 4 });
 export const getGenres = () => api('/api/genres', { cacheable: true });
-export const getSeries = (signal) => api('/api/series', { signal, cacheable: true });
+export const getSeries = (signal) => api('/api/series', { signal, cacheable: true, retries: 4 });
 
 /** Admin panel: password session, Cinemeta search, add/list/remove films. */
 export const adminLogin = (key) =>
