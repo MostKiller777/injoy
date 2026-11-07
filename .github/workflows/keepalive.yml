@@ -1,0 +1,33 @@
+name: keepalive
+
+# Render's free plan spins the service down after 15 minutes without a request.
+# A request every five minutes keeps it warm, so opening the site never lands on
+# Render's "service waking up" page.
+#
+# Scheduled workflows only run on the default branch, which is `main` here.
+# Each run pings three times a minute apart: if GitHub delays a run, the
+# previous run's pings still cover the gap.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Warm the instance
+        run: |
+          for attempt in 1 2 3; do
+            code=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' https://injoy-p9xe.onrender.com/api/health || true)
+            echo "ping ${attempt}: ${code}"
+            if [ "${attempt}" != "3" ]; then sleep 60; fi
+          done
